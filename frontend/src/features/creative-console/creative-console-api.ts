@@ -1,3 +1,5 @@
+import { runtimeConfig } from "@/shared/config/runtime-config";
+
 export type ChatMessage = {
   role: "system" | "user" | "assistant";
   content: string;
@@ -164,7 +166,7 @@ async function publicApiRequest(apiKey: string, path: string, options: RequestOp
     headers.set("Content-Type", "application/json");
     body = JSON.stringify(options.body);
   }
-  const response = await fetch(`/v1${path}`, {
+  const response = await fetch(`${runtimeConfig.apiBaseUrl}/v1${path}`, {
     method: options.method ?? "GET",
     headers,
     body,
@@ -189,7 +191,7 @@ async function publicApiRequest(apiKey: string, path: string, options: RequestOp
 }
 
 async function publicResponsesStream(apiKey: string, body: Record<string, unknown>, onUpdate?: (snapshot: ChatStreamSnapshot) => void, signal?: AbortSignal): Promise<ChatResponseResult> {
-  const response = await fetch("/v1/responses", {
+  const response = await fetch(`${runtimeConfig.apiBaseUrl}/v1/responses`, {
     method: "POST",
     headers: new Headers({ Accept: "text/event-stream", Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" }),
     body: JSON.stringify(body),
