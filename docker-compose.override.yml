@@ -1,0 +1,7 @@
+services:
+  grok2api:
+    network_mode: bridge
+  egress-quality-guard:
+    network_mode: "service:grok2api"
+    environment:
+      GROK2API_BASE_URL: http://127.0.0.1:8000
