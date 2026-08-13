@@ -22,10 +22,11 @@ const (
 )
 
 type bootstrapFile struct {
-	Version       int             `json:"version"`
-	Enabled       bool            `json:"enabled"`
-	InternalToken string          `json:"internal_token,omitempty"`
-	Config        bootstrapConfig `json:"config"`
+	Version           int             `json:"version"`
+	Enabled           bool            `json:"enabled"`
+	InternalToken     string          `json:"internal_token,omitempty"`
+	QualityRetryToken string          `json:"quality_retry_token,omitempty"`
+	Config            bootstrapConfig `json:"config"`
 }
 
 type bootstrapConfig struct {
@@ -69,6 +70,7 @@ func Prepare(path string, value config.QualityGuardConfig, jwtSecret string) (st
 	}
 	payload := bootstrapFile{
 		Version: bootstrapVersion, Enabled: value.Enabled, InternalToken: token,
+		QualityRetryToken: DeriveRetryToken(jwtSecret),
 		Config: bootstrapConfig{
 			Model:  strings.TrimSpace(value.Model),
 			Prompt: ProbePrompt, Expected: ProbeExpected,
@@ -86,6 +88,14 @@ func Prepare(path string, value config.QualityGuardConfig, jwtSecret string) (st
 		return "", fmt.Errorf("写入质量守护 bootstrap: %w", err)
 	}
 	return token, nil
+}
+
+// DeriveRetryToken returns the process-scoped token used only by the local
+// quality retry proxy. It is distinct from the quality guard token.
+func DeriveRetryToken(secret string) string {
+	mac := hmac.New(sha256.New, []byte(secret))
+	_, _ = mac.Write([]byte("grok2api:quality-retry:internal:v1"))
+	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 }
 
 func deriveToken(secret string) string {

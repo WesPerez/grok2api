@@ -297,12 +297,15 @@ func (h *Handler) createChatCompletion(c *gin.Context) {
 	}
 	requestID, _ := c.Get(middleware.RequestIDKey)
 	requestIDValue, _ := requestID.(string)
+	qualityRetry, excludedAccountIDs := middleware.QualityRetryMetadata(c)
 	result, err := h.gateway.CreateChatCompletion(c.Request.Context(), gateway.Input{
 		RequestID: requestIDValue, ClientKey: clientKey, PublicModel: request.Model,
 		Body: body, Streaming: request.Stream, PromptCacheKey: request.PromptCacheKey,
 		PromptCacheSeed:           extractPromptCacheSeed(c.Request.Header, body),
 		AllowClientToolCacheRoute: allowBuildClientToolCacheRoute(c.Request.Header),
 		GrokTurnIndex:             c.GetHeader("x-grok-turn-idx"),
+		QualityRetry:              qualityRetry,
+		ExcludedAccountIDs:        excludedAccountIDs,
 	})
 	if err != nil {
 		writeGatewayError(c, err)
@@ -339,12 +342,15 @@ func (h *Handler) createMessage(c *gin.Context) {
 	}
 	requestID, _ := c.Get(middleware.RequestIDKey)
 	requestIDValue, _ := requestID.(string)
+	qualityRetry, excludedAccountIDs := middleware.QualityRetryMetadata(c)
 	result, err := h.gateway.CreateMessage(c.Request.Context(), gateway.Input{
 		RequestID: requestIDValue, ClientKey: clientKey, PublicModel: request.Model,
 		Body: body, Streaming: request.Stream, PromptCacheKey: request.PromptCacheKey,
 		PromptCacheSeed:           extractPromptCacheSeed(c.Request.Header, body),
 		AllowClientToolCacheRoute: allowBuildClientToolCacheRoute(c.Request.Header),
 		GrokTurnIndex:             c.GetHeader("x-grok-turn-idx"),
+		QualityRetry:              qualityRetry,
+		ExcludedAccountIDs:        excludedAccountIDs,
 	})
 	if err != nil {
 		writeGatewayAnthropicError(c, err)
@@ -898,6 +904,7 @@ func (h *Handler) handleCreate(c *gin.Context, compact bool) {
 		AllowClientToolCacheRoute: allowBuildClientToolCacheRoute(c.Request.Header),
 		GrokTurnIndex:             c.GetHeader("x-grok-turn-idx"),
 	}
+	input.QualityRetry, input.ExcludedAccountIDs = middleware.QualityRetryMetadata(c)
 	var result *gateway.Result
 	if compact {
 		result, err = h.gateway.CompactResponse(c.Request.Context(), input)

@@ -108,6 +108,12 @@ type Input struct {
 	// ForcedEgressNodeID is an internal-only administrator probe constraint.
 	// Public inference handlers never populate it.
 	ForcedEgressNodeID uint64
+	// QualityRetry marks a request from the local quality retry proxy. The
+	// excluded IDs are applied to this request's initial account candidate set.
+	// Public callers cannot set these fields without the process-scoped header
+	// validation in the HTTP transport.
+	QualityRetry       bool
+	ExcludedAccountIDs []uint64
 }
 
 type Usage struct {
@@ -910,7 +916,14 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 			return nil, err
 		}
 	}
-	excluded := make(map[uint64]bool)
+	excluded := make(map[uint64]bool, len(input.ExcludedAccountIDs))
+	if input.QualityRetry {
+		for _, accountID := range input.ExcludedAccountIDs {
+			if accountID != 0 {
+				excluded[accountID] = true
+			}
+		}
+	}
 	failureFingerprints := make(map[string]int)
 	authRecoveryAttempted := make(map[uint64]bool)
 	quotaMode := s.providers.QuotaMode(route.Provider, route.UpstreamModel)
@@ -1267,6 +1280,12 @@ attemptLoop:
 			}
 		}
 		accountID := credential.ID
+		if input.QualityRetry {
+			if response.Header == nil {
+				response.Header = make(http.Header)
+			}
+			response.Header.Set("X-Grok-Quality-Retry-Account-ID", strconv.FormatUint(accountID, 10))
+		}
 		var once sync.Once
 		finalize := func(usage Usage, responseID, errorCode string) {
 			once.Do(func() {

@@ -63,6 +63,7 @@ type Dependencies struct {
 	QualityGuardStatePath  string
 	QualityGuardConfigPath string
 	QualityGuardToken      string
+	QualityRetryToken      string
 	QualityGuardProbe      egressapp.QualityProbeInput
 	Updates                *updatecheckapp.Service
 }
@@ -172,6 +173,7 @@ func New(deps Dependencies) *gin.Engine {
 	v1 := router.Group("/v1")
 	v1.Use(deps.ConcurrencyGate.Middleware())
 	v1.Use(middleware.ObserveBodyMemory())
+	v1.Use(middleware.QualityRetry(deps.QualityRetryToken))
 	if deps.TrafficReady != nil {
 		v1.Use(func(c *gin.Context) {
 			if deps.TrafficReady() {
