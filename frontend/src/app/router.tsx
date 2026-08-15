@@ -33,4 +33,4 @@ export const router = createBrowserRouter([
     ],
   },
   { path: "*", element: <Navigate to="/dashboard" replace /> },
-], { basename: "/gork2api" });
+], { basename: "/grok2api" });

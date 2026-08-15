@@ -345,7 +345,7 @@ identity automatically:
 ```yaml
 qualityGuard:
   enabled: true
-  model: "grok-4.5"
+  model: "grok-4.6"
 ```
 
 ```bash
