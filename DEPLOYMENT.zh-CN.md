@@ -46,6 +46,9 @@ Nginx 动态端口映射及本地 protected-retry middleware 均退役。Nginx �
 
 - 确认 `/healthz`、`/readyz`、前端子路径及镜像 revision。
 - 刷新账号凭据、额度和模型目录，分别记录有效、停用、失效凭据和额度不足数量。
+- 管理端「检测账号」固定检测 `grok-4.7`，模型级拒绝/额度阻断也按 `grok-4.7` 保存。
+  Build 余额快照是按需更新的，验证额度前显式调用目标账号 `refresh-billing`；已有快照
+  不会因凭据或模型同步自动变新。检测请求默认推理档位与单独的 xhigh 链路验收分开记录。
 - Sub2 账号 2221 只映射完整名称 `grok-4.7`；通过管理员 API 更新以刷新调度缓存。
 - 逐层验证 Responses 普通/流式、工具往返、图片输入和真实模型归属；HTTP 200 中的 SSE
   `response.failed` 不算成功。Router 验收必须核对实际模型，不能把降级到其它模型当作 Grok 成功。
