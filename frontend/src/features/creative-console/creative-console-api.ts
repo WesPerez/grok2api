@@ -1,5 +1,5 @@
 import { runtimeConfig } from "@/shared/config/runtime-config";
-import { serverImageURL } from "@/shared/lib/server-media-url";
+import { serverMediaURL } from "@/shared/lib/server-media-url";
 
 export type ChatMessage = {
   role: "system" | "user" | "assistant";
@@ -529,7 +529,7 @@ function resolveMediaURL(value: string): string {
   if (!url || url.startsWith("data:") || url.startsWith("blob:")) return url;
   try {
     const browserOrigin = typeof window === "undefined" ? "http://localhost" : window.location.origin;
-    const media = serverImageURL(url, runtimeConfig.apiBaseUrl, browserOrigin);
+    const media = serverMediaURL(url, runtimeConfig.apiBaseUrl, browserOrigin);
     if (media) return media;
     const resolved = new URL(url, `${browserOrigin}/`);
     return resolved.origin === browserOrigin ? `${resolved.pathname}${resolved.search}${resolved.hash}` : resolved.toString();

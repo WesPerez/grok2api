@@ -3,8 +3,9 @@
 生产链路为 Router → Sub2API 账号 2221 → Nginx `/grok2api/` → grok2api → Resin
 `AppsGlobal.{account}`。Sub2API 到本机服务使用直连代理；账号出口身份在 grok2api 内部生成。
 
-源码以 chenyme/grok2api v3.1.6 为基线。保留 `/grok2api` 前端路径和独立 Docker 网络，补充
-Grok 4.7 的四档推理、500k 上下文、图片能力及官方价卡。模型从 Build `/models` 发现，
+源码同步 chenyme/grok2api main `5e5ad755`（v3.1.6 后的 Build 1.0.40 适配）。
+保留 `/grok2api` 前端路径和独立 Docker 网络，以及 Grok 4.7 的四档推理、500k 上下文、
+图片能力及官方价卡。推理菜单优先使用 Build 模型目录，静态能力作回退。模型从 Build `/models` 发现，
 不把 4.7 自动伪装成 4.6，也不为旧版本猜测兼容路由。
 
 ## 发布与回滚
