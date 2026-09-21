@@ -9,8 +9,9 @@ Grok 4.7 的四档推理、500k 上下文、图片能力及官方价卡。模型
 
 ## 发布与回滚
 
-推送 `main` 后由 `GHCR Image` 工作流执行后端测试、vet、Swagger 校验、前端 lint/build，
+推送 `main` 后由 `GHCR Image` 工作流执行后端测试、vet、Swagger 校验、前端 test/lint/build，
 再发布 `ghcr.io/wesperez/grok2api:sha-<40位提交>`。部署必须核对镜像 revision 并锁定 digest。
+同一工作流允许在 `main` 手动触发完整验证与发布，便于恢复未触发的 fork 工作流；其它分支手动触发只构建验证。
 本机不构建镜像。Compose 必须从 `/root/grok2api` 读取原有 `.env` 和 `config.yaml`，
 保留 `GROK2API_PORT=127.0.0.1:18000`，不得在临时源码工作树直接启动默认 Compose。
 
