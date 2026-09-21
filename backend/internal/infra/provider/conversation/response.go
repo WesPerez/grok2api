@@ -8,11 +8,51 @@ import (
 
 // ResponseOptions 保留无法直接交给 Responses 上游执行的下游协议语义。
 type ResponseOptions struct {
-	AnthropicThinking          bool
+	AnthropicThinking bool
+	// ReasoningEffort is the effective client-facing Messages setting after
+	// budget and effort aliases have been converted to a canonical level.
+	ReasoningEffort            string
+	ReasoningEffortSet         bool
 	AnthropicWebSearch         bool
 	AnthropicWebSearchRequired bool
 	AnthropicWebSearchQuery    string
 	StopSequences              []string
+	// Include mirrors xAI Responses `include` (e.g. "no_inline_citations", "inline_citations").
+	Include []string
+	// InlineCitations overrides Include when non-nil.
+	InlineCitations *bool
+	// reasoningCache and reasoningScope are intentionally populated only by a
+	// provider that has a trusted, isolated client-session identity. A raw
+	// call_id is not sufficient to restore encrypted reasoning safely.
+	reasoningCache *ReasoningCache
+	reasoningScope string
+}
+
+// WithReasoningReplay attaches a provider-owned, scoped reasoning cache to
+// the conversion options. The scope must include the client session and the
+// upstream plane; an empty scope disables the bridge.
+func (o ResponseOptions) WithReasoningReplay(cache *ReasoningCache, scope string) ResponseOptions {
+	o.reasoningCache = cache
+	o.reasoningScope = scope
+	return o
+}
+
+// InlineCitationsEnabled reports whether [[N]](url) markers should be embedded.
+// Default is true (xAI Responses API default for HTTP clients).
+func (o ResponseOptions) InlineCitationsEnabled() bool {
+	if o.InlineCitations != nil {
+		return *o.InlineCitations
+	}
+	enabled := true
+	for _, item := range o.Include {
+		switch item {
+		case "no_inline_citations":
+			enabled = false
+		case "inline_citations":
+			enabled = true
+		}
+	}
+	return enabled
 }
 
 type responseEnvelope struct {
@@ -102,6 +142,7 @@ func ConvertResponseJSONWithOptions(body []byte, operation string, options Respo
 		}
 		return body, nil
 	}
+	options.reasoningCache.RememberReasoningForEnvelope(options.reasoningScope, envelope)
 	parsed := parseResponse(envelope)
 	if operation == OperationMessages || operation == OperationChat {
 		parsed.Text, parsed.StopSequence = applyStopSequences(parsed.Text, options.StopSequences)

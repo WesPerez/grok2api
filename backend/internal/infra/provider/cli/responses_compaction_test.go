@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -15,6 +16,7 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/conversation"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/pkg/neterror"
 )
 
 func TestGatewayCompactionLifecycle(t *testing.T) {
@@ -50,16 +52,86 @@ func TestGatewayCompactionLifecycle(t *testing.T) {
 		t.Fatalf("content type = %q", contentType)
 	}
 	blob = compactionBlobFromSSE(t, stream)
-	expanded, foreign, err := expandGatewayCompactionHistory([]byte(`{"input":[{"type":"compaction","encrypted_content":`+mustJSONString(blob)+`}]} `), codec, "session-1")
+	expanded, drifted, err := expandGatewayCompactionHistory([]byte(`{"input":[{"type":"compaction","encrypted_content":`+mustJSONString(blob)+`}]} `), codec, "session-1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if foreign != 0 || !strings.Contains(string(expanded), "This session is being continued") || strings.Contains(string(expanded), `"type":"compaction"`) || !strings.Contains(string(expanded), `"role":"user"`) {
-		t.Fatalf("expanded = %s, foreign = %d", expanded, foreign)
+	if drifted != 0 || !strings.Contains(string(expanded), "This session is being continued") || strings.Contains(string(expanded), `"type":"compaction"`) || !strings.Contains(string(expanded), `"role":"user"`) {
+		t.Fatalf("expanded = %s, drifted = %d", expanded, drifted)
 	}
-	mismatched, unusable, err := expandGatewayCompactionHistory([]byte(`{"input":[{"type":"compaction","encrypted_content":`+mustJSONString(blob)+`}]} `), codec, "other-session")
-	if err != nil || unusable != 1 || strings.Contains(string(mismatched), blob) || !strings.Contains(string(mismatched), "could not be decoded") {
-		t.Fatalf("session mismatch fallback = %s, unusable = %d, err = %v", mismatched, unusable, err)
+	mismatched, drifted, err := expandGatewayCompactionHistory([]byte(`{"input":[{"type":"compaction","encrypted_content":`+mustJSONString(blob)+`}]} `), codec, "other-session")
+	if err != nil || drifted != 1 || strings.Contains(string(mismatched), blob) || strings.Contains(string(mismatched), "could not be decoded") || !strings.Contains(string(mismatched), "This session is being continued") {
+		t.Fatalf("session mismatch expansion = %s, drifted = %d, err = %v", mismatched, drifted, err)
+	}
+}
+
+func TestForwardResponseRetainsSessionDriftedCompaction(t *testing.T) {
+	adapter, encrypted := newCompactionTestAdapter(t)
+	blob, err := adapter.compaction.encode("old-session", gatewayCompactionContinuation(healthyCompactionSummary()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter.http.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		data, readErr := io.ReadAll(request.Body)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if strings.Contains(string(data), blob) || strings.Contains(string(data), "could not be decoded") || !strings.Contains(string(data), "This session is being continued") {
+			t.Fatalf("session-drifted summary was not retained: %s", data)
+		}
+		return sseResponse(http.StatusOK, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_drifted\",\"object\":\"response\",\"status\":\"completed\",\"model\":\"grok-4.5\",\"output\":[]}}\n\n", request), nil
+	})
+	response, err := adapter.ForwardResponse(t.Context(), provider.ResponseResourceRequest{
+		Credential: account.Credential{ID: 1, Provider: account.ProviderBuild, EncryptedAccessToken: encrypted},
+		Method:     http.MethodPost, Path: "/responses", Model: "grok-4.5", PromptCacheKey: "new-session",
+		Streaming: true, NormalizeBody: true,
+		Body: []byte(`{"model":"public","stream":true,"input":[{"type":"compaction","encrypted_content":` + mustJSONString(blob) + `},{"role":"user","content":"continue"}]}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if !strings.Contains(response.Header.Get("X-Grok2API-Compatibility-Warnings"), "compaction_session_drifted") {
+		t.Fatalf("warnings = %q", response.Header.Get("X-Grok2API-Compatibility-Warnings"))
+	}
+}
+
+func TestUndecodableGatewayCompactionReturnsRequestError(t *testing.T) {
+	cipher, err := security.NewCipher(base64.StdEncoding.EncodeToString(make([]byte, 32)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := []byte(`{"input":[{"type":"compaction","encrypted_content":"g2a_compact_v1.invalid"}]}`)
+	expanded, drifted, err := expandGatewayCompactionHistory(body, newGatewayCompactionCodec(cipher), "session-1")
+	var requestErr *responsesRequestError
+	if !errors.As(err, &requestErr) || requestErr.Code != "invalid_compaction_blob" || requestErr.Param != "input[0].encrypted_content" {
+		t.Fatalf("error = %#v", err)
+	}
+	if drifted != 0 || !bytes.Equal(expanded, body) {
+		t.Fatalf("expanded = %s, drifted = %d", expanded, drifted)
+	}
+}
+
+func TestForwardResponseRejectsUndecodableGatewayCompactionBeforeUpstream(t *testing.T) {
+	adapter, encrypted := newCompactionTestAdapter(t)
+	var calls atomic.Int32
+	adapter.http.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		calls.Add(1)
+		return jsonHTTPResponse(request, http.StatusOK, `{}`), nil
+	})
+	response, err := adapter.ForwardResponse(t.Context(), provider.ResponseResourceRequest{
+		Credential: account.Credential{ID: 1, Provider: account.ProviderBuild, EncryptedAccessToken: encrypted},
+		Method:     http.MethodPost, Path: "/responses", Model: "grok-4.5", PromptCacheKey: "session-1",
+		NormalizeBody: true,
+		Body:          []byte(`{"model":"public","input":[{"type":"compaction","encrypted_content":"g2a_compact_v1.invalid"}]}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	body, _ := io.ReadAll(response.Body)
+	if calls.Load() != 0 || response.StatusCode != http.StatusBadRequest || !strings.Contains(string(body), `"code":"invalid_compaction_blob"`) || !strings.Contains(string(body), `"param":"input[0].encrypted_content"`) {
+		t.Fatalf("calls=%d status=%d body=%s", calls.Load(), response.StatusCode, body)
 	}
 }
 
@@ -104,6 +176,46 @@ func TestGatewayCompactionRetryVetoStopsSameAccountRetries(t *testing.T) {
 	defer response.Body.Close()
 	if attempts.Load() != 1 || response.StatusCode != http.StatusTooManyRequests {
 		t.Fatalf("attempts=%d status=%d", attempts.Load(), response.StatusCode)
+	}
+}
+
+func TestGatewayCompactionSemanticIdleIgnoresKeepalives(t *testing.T) {
+	adapter, encrypted := newCompactionTestAdapter(t)
+	cfg := adapter.config()
+	cfg.StreamIdleTimeout = 60 * time.Millisecond
+	adapter.UpdateConfig(cfg)
+
+	writeDone := make(chan struct{})
+	adapter.http.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		reader, writer := io.Pipe()
+		go func() {
+			defer close(writeDone)
+			defer writer.Close()
+			for {
+				if _, err := io.WriteString(writer, ": keep-alive\n\n"); err != nil {
+					return
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+		}()
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Status:     "200 OK",
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       reader,
+			Request:    request,
+		}, nil
+	})
+
+	request := compactionProviderRequest(encrypted)
+	_, err := adapter.forwardGatewayCompactionWithPolicy(t.Context(), request, "access-token", request.Body, "", 1, 0)
+	if !errors.Is(err, neterror.ErrUpstreamStreamIdleTimeout) {
+		t.Fatalf("compaction error = %v, want ErrUpstreamStreamIdleTimeout", err)
+	}
+	select {
+	case <-writeDone:
+	case <-time.After(time.Second):
+		t.Fatal("semantic timeout did not close the compaction response body")
 	}
 }
 
@@ -192,17 +304,55 @@ func TestPrepareGatewayCompactionSampleOmitsToolChoiceWithoutTools(t *testing.T)
 	}
 }
 
-func TestForeignCompactionNeverReachesBuildModelInput(t *testing.T) {
+func TestUpstreamCompactionBlobIsForwarded(t *testing.T) {
 	cipher, err := security.NewCipher(base64.StdEncoding.EncodeToString(make([]byte, 32)))
 	if err != nil {
 		t.Fatal(err)
 	}
-	expanded, foreign, err := expandGatewayCompactionHistory([]byte(`{"input":[{"type":"compaction","encrypted_content":"gAAAAABforeign-codex-replay"},{"role":"user","content":"continue"}]}`), newGatewayCompactionCodec(cipher), "session-1")
+	blob := "opaque/upstream+compact=blob"
+	body := []byte(`{"previous_response_id":"resp_compacted","input":[{"type":"compaction","encrypted_content":` + mustJSONString(blob) + `},{"role":"user","content":"continue"}]}`)
+	expanded, drifted, err := expandGatewayCompactionHistory(body, newGatewayCompactionCodec(cipher), "session-1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if foreign != 1 || strings.Contains(string(expanded), "gAAAAABforeign-codex-replay") || strings.Contains(string(expanded), `"type":"compaction"`) {
-		t.Fatalf("expanded = %s, foreign = %d", expanded, foreign)
+	if drifted != 0 || !bytes.Equal(expanded, body) {
+		t.Fatalf("expanded = %s, drifted = %d", expanded, drifted)
+	}
+}
+
+func TestForwardResponseKeepsUpstreamCompactionBlob(t *testing.T) {
+	adapter, encrypted := newCompactionTestAdapter(t)
+	blob := "opaque/upstream+compact=blob"
+	adapter.http.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		data, readErr := io.ReadAll(request.Body)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		var forwarded struct {
+			PreviousResponseID string `json:"previous_response_id"`
+			Input              []struct {
+				Type             string `json:"type"`
+				ID               string `json:"id"`
+				EncryptedContent string `json:"encrypted_content"`
+			} `json:"input"`
+		}
+		if json.Unmarshal(data, &forwarded) != nil || forwarded.PreviousResponseID != "resp_compacted" || len(forwarded.Input) != 2 || forwarded.Input[0].Type != "compaction" || forwarded.Input[0].ID != "cmp_upstream" || forwarded.Input[0].EncryptedContent != blob || strings.Contains(string(data), "could not be decoded") {
+			t.Fatalf("upstream compact blob was rewritten: %s", data)
+		}
+		return jsonHTTPResponse(request, http.StatusOK, `{"id":"resp_ok","status":"completed","output":[]}`), nil
+	})
+	response, err := adapter.ForwardResponse(t.Context(), provider.ResponseResourceRequest{
+		Credential: account.Credential{ID: 1, Provider: account.ProviderBuild, EncryptedAccessToken: encrypted},
+		Method:     http.MethodPost, Path: "/responses", Model: "grok-4.5", PromptCacheKey: "session-1",
+		NormalizeBody: true,
+		Body:          []byte(`{"model":"public","previous_response_id":"resp_compacted","input":[{"type":"compaction","id":"cmp_upstream","encrypted_content":` + mustJSONString(blob) + `},{"role":"user","content":"continue"}]}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK || response.Header.Get("X-Grok2API-Compatibility-Warnings") != "" {
+		t.Fatalf("status=%d warnings=%q", response.StatusCode, response.Header.Get("X-Grok2API-Compatibility-Warnings"))
 	}
 }
 

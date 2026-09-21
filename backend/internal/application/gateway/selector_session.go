@@ -28,6 +28,7 @@ type selectionSession struct {
 	retryAccountID   uint64
 	stickyTried      bool
 	staleCandidates  map[uint64]bool
+	materialFailures credentialMaterialFailureTracker
 }
 
 func (s *Selector) beginSelectionSession(ctx context.Context, provider account.Provider, modelRouteID uint64, upstreamModel, quotaMode, affinityKey string, excluded map[uint64]bool, allowQuotaProbe bool) (*selectionSession, error) {
@@ -46,6 +47,7 @@ func (s *Selector) beginSelectionSessionForKey(ctx context.Context, provider acc
 		return nil, err
 	}
 	quotaConsumed := s.quotaConsumptionSnapshot(provider)
+	healthOverrides := s.routingHealthSnapshot(provider, now)
 
 	session = &selectionSession{
 		selector:        s,
@@ -66,7 +68,7 @@ func (s *Selector) beginSelectionSessionForKey(ctx context.Context, provider acc
 	var earliestRetry time.Time
 
 	for index, candidate := range values {
-		value := candidate.Credential
+		value := applyHealthSnapshot(candidate.Credential, healthOverrides)
 		if !accountScopeAllowsCandidate(provider, accountScope, candidate) {
 			continue
 		}
@@ -74,13 +76,18 @@ func (s *Selector) beginSelectionSessionForKey(ctx context.Context, provider acc
 			continue
 		}
 		consideredCandidates++
-		if candidate.ModelCapabilityKnown && !candidate.SupportsModel {
+		if !s.candidateSupportsModel(provider, upstreamModel, quotaMode, candidate) {
 			continue
 		}
 		supportedCandidates++
 		if candidate.ModelQuotaBlock != nil && now.Before(candidate.ModelQuotaBlock.CooldownUntil) {
 			modelCoolingCandidates++
 			earliestRetry = earlierFuture(earliestRetry, candidate.ModelQuotaBlock.CooldownUntil, now)
+			continue
+		}
+		if candidateEgressLeaseCooling(candidate, value, now) {
+			coolingCandidates++
+			earliestRetry = earlierFuture(earliestRetry, candidate.EgressLeaseBlock.CooldownUntil, now)
 			continue
 		}
 		if value.CooldownUntil != nil && now.Before(*value.CooldownUntil) {
@@ -137,7 +144,7 @@ func (session *selectionSession) Acquire(ctx context.Context, excluded map[uint6
 		session.retryAccountID = 0
 		if !session.candidateExcluded(excluded, accountID) {
 			if candidate, ok := routingCandidateByID(session.values, session.normalCandidates, accountID); ok {
-				lease, err := session.selector.claimAccountSlot(ctx, candidate.Credential)
+				lease, err := session.selector.claimAccountSlotTracked(ctx, candidate.Credential, &session.materialFailures)
 				if err != nil {
 					if errors.Is(err, errRoutingCredentialStale) {
 						session.markCandidateStale(accountID)
@@ -178,7 +185,7 @@ func (session *selectionSession) acquireQuotaProbe(ctx context.Context, excluded
 		return nil, nil
 	}
 	if session.probePlan == nil {
-		plan, err := session.selector.planCandidateIndexes(ctx, session.values, session.probeCandidates, time.Now().UTC(), session.selector.resolveTierOrder(session.provider, session.upstreamModel))
+		plan, err := session.selector.planCandidateIndexes(ctx, session.values, session.probeCandidates, time.Now().UTC(), session.selector.resolveTierOrder(session.provider, session.upstreamModel, session.quotaMode))
 		if err != nil {
 			return nil, err
 		}
@@ -188,7 +195,7 @@ func (session *selectionSession) acquireQuotaProbe(ctx context.Context, excluded
 		if session.candidateExcluded(excluded, candidate.Credential.ID) {
 			continue
 		}
-		lease, err := session.selector.claimAccountSlot(ctx, candidate.Credential)
+		lease, err := session.selector.claimAccountSlotTracked(ctx, candidate.Credential, &session.materialFailures)
 		if err != nil {
 			if errors.Is(err, errRoutingCredentialStale) {
 				session.markCandidateStale(candidate.Credential.ID)
@@ -233,7 +240,7 @@ func (session *selectionSession) acquireNormal(ctx context.Context, excluded map
 				if candidate.Credential.ID != stickyID {
 					continue
 				}
-				lease, err := session.selector.acquirePinnedCapacity(ctx, candidate.Credential)
+				lease, err := session.selector.acquirePinnedCapacity(ctx, candidate.Credential, &session.materialFailures)
 				if err != nil {
 					if errors.Is(err, errRoutingCredentialStale) {
 						session.markCandidateStale(stickyID)
@@ -252,18 +259,24 @@ func (session *selectionSession) acquireNormal(ctx context.Context, excluded map
 			}
 		}
 	}
-	if session.stickyKey == "" {
-		indexes := session.unexcludedNormalIndexes(excluded)
-		activeRequest := session.selector.nextSegmentedActiveRequest(session.provider, session.upstreamModel, session.quotaMode, len(indexes))
-		if activeRequest != nil {
-			return session.selector.acquireSegmentedCandidates(ctx, session.values, indexes, session.quotaMode, session.selector.resolveTierOrder(session.provider, session.upstreamModel), *activeRequest)
+	indexes := session.unexcludedNormalIndexes(excluded)
+	activeRequest := session.selector.nextSegmentedActiveRequest(session.provider, session.upstreamModel, session.quotaMode, len(indexes))
+	if activeRequest != nil {
+		lease, err := session.selector.acquireSegmentedCandidates(ctx, session.values, indexes, session.quotaMode, session.selector.resolveTierOrder(session.provider, session.upstreamModel, session.quotaMode), *activeRequest, &session.materialFailures)
+		if err != nil || lease == nil || session.stickyKey == "" {
+			return lease, err
 		}
+		if lease.routingCandidate == nil {
+			lease.Release()
+			return nil, errors.New("分段选号缺少候选上下文")
+		}
+		return session.completeNormalLease(ctx, lease, *lease.routingCandidate, excluded)
 	}
 
 	deadline := time.Now().Add(capacityWait)
 	for {
 		if session.normalPlan == nil {
-			plan, err := session.selector.planCandidateIndexes(ctx, session.values, session.normalCandidates, time.Now().UTC(), session.selector.resolveTierOrder(session.provider, session.upstreamModel))
+			plan, err := session.selector.planCandidateIndexes(ctx, session.values, session.normalCandidates, time.Now().UTC(), session.selector.resolveTierOrder(session.provider, session.upstreamModel, session.quotaMode))
 			if err != nil {
 				return nil, err
 			}
@@ -273,7 +286,7 @@ func (session *selectionSession) acquireNormal(ctx context.Context, excluded map
 			if session.candidateExcluded(excluded, candidate.Credential.ID) {
 				continue
 			}
-			lease, err := session.selector.claimAccountSlot(ctx, candidate.Credential)
+			lease, err := session.selector.claimAccountSlotTracked(ctx, candidate.Credential, &session.materialFailures)
 			if err != nil {
 				if errors.Is(err, errRoutingCredentialStale) {
 					session.markCandidateStale(candidate.Credential.ID)
@@ -314,7 +327,7 @@ func (session *selectionSession) completeNormalLease(ctx context.Context, lease 
 		}
 		if boundID != candidate.Credential.ID {
 			if boundCandidate, eligible := routingCandidateByID(session.values, session.normalCandidates, boundID); eligible && !session.candidateExcluded(excluded, boundID) {
-				boundLease, acquireErr := session.selector.claimAccountSlot(ctx, boundCandidate.Credential)
+				boundLease, acquireErr := session.selector.claimAccountSlotTracked(ctx, boundCandidate.Credential, &session.materialFailures)
 				if acquireErr != nil {
 					if errors.Is(acquireErr, errRoutingCredentialStale) {
 						session.markCandidateStale(boundID)
@@ -352,7 +365,31 @@ func (session *selectionSession) hasUnexcludedNormal(excluded map[uint64]bool) b
 	return false
 }
 
+// hasAvailableCandidate reports whether this request-level snapshot still has
+// an account the quality retry is allowed to switch to. This is deliberately
+// stronger than checking the routing attempt counter: a large attempt budget
+// does not imply that another account exists.
+func (session *selectionSession) hasAvailableCandidate(excluded map[uint64]bool, allowQuotaProbe bool) bool {
+	if session == nil {
+		return false
+	}
+	if session.hasUnexcludedNormal(excluded) {
+		return true
+	}
+	if allowQuotaProbe {
+		for _, index := range session.probeCandidates {
+			if !session.candidateExcluded(excluded, session.values[index].Credential.ID) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func (session *selectionSession) unexcludedNormalIndexes(excluded map[uint64]bool) []int {
+	if len(excluded) == 0 && len(session.staleCandidates) == 0 {
+		return session.normalCandidates
+	}
 	indexes := make([]int, 0, len(session.normalCandidates))
 	for _, index := range session.normalCandidates {
 		if !session.candidateExcluded(excluded, session.values[index].Credential.ID) {

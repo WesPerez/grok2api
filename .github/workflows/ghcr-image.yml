@@ -143,6 +143,7 @@ jobs:
           images: ${{ steps.image.outputs.name }}
           tags: |
             type=ref,event=branch,suffix=-${{ matrix.arch }}
+            type=sha,format=long,prefix=sha-,suffix=-${{ matrix.arch }}
             type=ref,event=tag,suffix=-${{ matrix.arch }}
             type=raw,value=latest-${{ matrix.arch }},enable=${{ github.ref == 'refs/heads/main' }}
 
@@ -195,6 +196,7 @@ jobs:
           images: ${{ steps.image.outputs.name }}
           tags: |
             type=ref,event=branch
+            type=sha,format=long,prefix=sha-
             type=ref,event=tag
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
 

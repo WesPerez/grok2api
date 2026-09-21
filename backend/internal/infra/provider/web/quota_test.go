@@ -9,6 +9,7 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -77,6 +78,15 @@ func TestSyncQuotaFetchesWeeklyOnlyAfterPaidTierIsConfirmed(t *testing.T) {
 	var weeklyCalls atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		switch request.URL.Path {
+		case "/rest/media/imagine/quota_info":
+			writer.Header().Set("Content-Type", "application/json")
+			_, _ = writer.Write([]byte(`{
+				"image":{"available":true,"windowSizeSeconds":64800},
+				"imagePro":{"available":true,"windowSizeSeconds":64800},
+				"imageEdit":{"available":true,"windowSizeSeconds":64800},
+				"video":{"available":true,"windowSizeSeconds":64800},
+				"video720p":{"available":true,"windowSizeSeconds":64800}
+			}`))
 		case "/grok_api_v2.GrokBuildBilling/GetGrokCreditsConfig":
 			weeklyCalls.Add(1)
 			writer.Header().Set("Content-Type", "application/grpc-web+proto")
@@ -115,6 +125,58 @@ func TestSyncQuotaFetchesWeeklyOnlyAfterPaidTierIsConfirmed(t *testing.T) {
 	}
 	if snapshot.Tier != account.WebTierSuper || len(snapshot.Windows) != 1 || snapshot.Windows[0].Mode != weeklyQuotaMode || weeklyCalls.Load() != 1 {
 		t.Fatalf("snapshot = %#v, weekly calls = %d", snapshot, weeklyCalls.Load())
+	}
+}
+
+func TestSyncQuotaFailsWhenPaidWeeklySnapshotIsUnavailable(t *testing.T) {
+	var weeklyCalls atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/rest/media/imagine/quota_info":
+			writer.Header().Set("Content-Type", "application/json")
+			_, _ = writer.Write([]byte(`{
+				"image":{"available":true,"windowSizeSeconds":64800},
+				"imagePro":{"available":true,"windowSizeSeconds":64800},
+				"imageEdit":{"available":true,"windowSizeSeconds":64800},
+				"video":{"available":true,"windowSizeSeconds":64800},
+				"video720p":{"available":true,"windowSizeSeconds":64800}
+			}`))
+		case "/grok_api_v2.GrokBuildBilling/GetGrokCreditsConfig":
+			weeklyCalls.Add(1)
+			http.Error(writer, "temporary weekly failure", http.StatusServiceUnavailable)
+		case "/rest/rate-limits":
+			var payload struct {
+				ModelName string `json:"modelName"`
+			}
+			if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+				t.Errorf("quota payload: %v", err)
+			}
+			total := map[string]int{"auto": 50, "fast": 140}[payload.ModelName]
+			_ = json.NewEncoder(writer).Encode(map[string]any{
+				"windowSizeSeconds": 7200, "remainingQueries": total, "totalQueries": total,
+			})
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+
+	cipher, err := security.NewCipher(base64.StdEncoding.EncodeToString(make([]byte, 32)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	encrypted, err := cipher.Encrypt("test-sso")
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter := NewAdapter(Config{
+		BaseURL: server.URL, StatsigMode: "manual", StatsigManualValue: "test-signature",
+	}, infraegress.NewManager(egressRepositoryStub{}, cipher), cipher, nil, nil)
+	if _, err := adapter.SyncQuota(context.Background(), account.Credential{ID: 2, WebTier: account.WebTierAuto, EncryptedAccessToken: encrypted}); err == nil {
+		t.Fatal("expected the paid weekly failure to reject the partial snapshot")
+	}
+	if weeklyCalls.Load() != 1 {
+		t.Fatalf("weekly calls = %d", weeklyCalls.Load())
 	}
 }
 
@@ -386,6 +448,8 @@ func TestSyncQuotaCorrectsStoredSuperFromFreshWebQuota(t *testing.T) {
 	var weeklyCalls atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		switch request.URL.Path {
+		case "/rest/media/imagine/quota_info":
+			writeEmptyImagineQuota(writer)
 		case "/grok_api_v2.GrokBuildBilling/GetGrokCreditsConfig":
 			weeklyCalls.Add(1)
 			http.Error(writer, "not available", http.StatusNotFound)
@@ -438,5 +502,114 @@ func TestSyncQuotaCorrectsStoredSuperFromFreshWebQuota(t *testing.T) {
 	}
 	if weeklyCalls.Load() != 0 {
 		t.Fatalf("basic account probed weekly endpoint %d times", weeklyCalls.Load())
+	}
+}
+
+func writeEmptyImagineQuota(writer http.ResponseWriter) {
+	writer.Header().Set("Content-Type", "application/json")
+	_, _ = writer.Write([]byte(`{"image":null,"imageEdit":null,"imagePro":null,"video":null,"video720p":null}`))
+}
+
+func TestDecodeImagineQuotaSnapshotMatchesObservedProtocol(t *testing.T) {
+	now := time.Date(2026, 8, 17, 4, 0, 0, 0, time.UTC)
+	videoResetAt := time.Date(2026, 8, 18, 4, 47, 49, 902572219, time.UTC)
+	body := []byte(`{
+		"image": null,
+		"imageEdit": null,
+		"imagePro": {"available":true,"remainingQueries":2,"windowSizeSeconds":86400},
+		"video": null,
+		"video720p": {"available":true,"remainingQueries":0,"windowSizeSeconds":86400,"nextAvailableAt":"2026-08-18T04:47:49.902572219Z"}
+	}`)
+	windows, err := decodeImagineQuotaSnapshot(body, 42, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(windows) != 2 {
+		t.Fatalf("windows = %#v", windows)
+	}
+	wantResetAt := now.Add(24 * time.Hour)
+	if windows[0].Mode != account.QuotaModeWebImagePro || windows[0].Remaining != 2 || windows[0].Total != 0 || windows[0].ResetAt == nil || !windows[0].ResetAt.Equal(wantResetAt) {
+		t.Fatalf("image_pro = %#v", windows[0])
+	}
+	if windows[1].Mode != account.QuotaModeWebVideo720p || windows[1].Remaining != 0 || windows[1].Total != 0 || windows[1].ResetAt == nil || !windows[1].ResetAt.Equal(videoResetAt) {
+		t.Fatalf("video_720p = %#v", windows[1])
+	}
+}
+
+func TestDecodeImagineQuotaSnapshotPrefersUpstreamNextAvailableAt(t *testing.T) {
+	now := time.Date(2026, 8, 13, 8, 0, 0, 0, time.UTC)
+	upstreamResetAt := now.Add(37 * time.Minute)
+	body := []byte(`{
+		"image":null,"imageEdit":null,"video":null,"video720p":null,
+		"imagePro":{"available":true,"remainingQueries":4,"windowSizeSeconds":86400,"nextAvailableAt":"` + upstreamResetAt.Format(time.RFC3339) + `"}
+	}`)
+	windows, err := decodeImagineQuotaSnapshot(body, 42, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(windows) != 1 || windows[0].ResetAt == nil || !windows[0].ResetAt.Equal(upstreamResetAt) {
+		t.Fatalf("windows = %#v", windows)
+	}
+}
+
+func TestDecodeImagineQuotaSnapshotRequiresCompleteResponse(t *testing.T) {
+	now := time.Now().UTC()
+	_, err := decodeImagineQuotaSnapshot([]byte(`{"image":null,"imageEdit":null,"imagePro":null,"video":null}`), 42, now)
+	if err == nil || !strings.Contains(err.Error(), "video720p") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestDecodeImagineQuotaSnapshotAcceptsExplicitUnavailableProduct(t *testing.T) {
+	now := time.Now().UTC()
+	windows, err := decodeImagineQuotaSnapshot([]byte(`{
+		"image":null,"imageEdit":{"available":false},"imagePro":null,"video":null,"video720p":null
+	}`), 42, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(windows) != 1 || windows[0].Mode != account.QuotaModeWebImageEdit || windows[0].Remaining != 0 || windows[0].ResetAt == nil {
+		t.Fatalf("windows = %#v", windows)
+	}
+}
+
+func TestDecodeImagineQuotaSnapshotAcceptsAvailabilityOnlySharedWeeklyProducts(t *testing.T) {
+	now := time.Now().UTC()
+	windows, err := decodeImagineQuotaSnapshot([]byte(`{
+		"image":{"available":true,"windowSizeSeconds":64800},
+		"imagePro":{"available":true,"windowSizeSeconds":64800},
+		"imageEdit":{"available":true,"windowSizeSeconds":64800},
+		"video":{"available":true,"windowSizeSeconds":64800},
+		"video720p":{"available":true,"windowSizeSeconds":64800}
+	}`), 42, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(windows) != 0 {
+		t.Fatalf("availability-only products must use the shared weekly pool, got %#v", windows)
+	}
+}
+
+func TestDecodeImagineQuotaSnapshotRequiresWindowForIndependentCounter(t *testing.T) {
+	now := time.Now().UTC()
+	_, err := decodeImagineQuotaSnapshot([]byte(`{
+		"image":null,"imageEdit":null,
+		"imagePro":{"available":true,"remainingQueries":2},
+		"video":null,"video720p":null
+	}`), 42, now)
+	if err == nil || !strings.Contains(err.Error(), "imagePro") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestDecodeImagineQuotaSnapshotRequiresWindowForAvailabilityOnlyProduct(t *testing.T) {
+	now := time.Now().UTC()
+	_, err := decodeImagineQuotaSnapshot([]byte(`{
+		"image":null,"imageEdit":null,
+		"imagePro":{"available":true},
+		"video":null,"video720p":null
+	}`), 42, now)
+	if err == nil || !strings.Contains(err.Error(), "imagePro") {
+		t.Fatalf("err = %v", err)
 	}
 }

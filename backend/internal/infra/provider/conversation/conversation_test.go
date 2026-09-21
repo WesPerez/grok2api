@@ -1,11 +1,13 @@
 package conversation
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"io"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestConvertChatRequestToResponses(t *testing.T) {
@@ -50,6 +52,61 @@ func TestConvertChatRequestToResponses(t *testing.T) {
 	tools := payload["tools"].([]any)
 	if len(tools) != 2 || tools[0].(map[string]any)["name"] != "lookup" || tools[0].(map[string]any)["type"] != "function" || tools[1].(map[string]any)["type"] != "web_search" {
 		t.Fatalf("tools = %#v", tools)
+	}
+}
+
+func TestConvertChatPreservesWebSearchExcludedDomains(t *testing.T) {
+	converted, err := ConvertRequest([]byte(`{
+		"model":"public-chat","messages":[{"role":"user","content":"search"}],
+		"tools":[{"type":"web_search","filters":{"excluded_domains":["blocked.example"]}}]
+	}`), "grok-4.6", OperationChat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(converted, &payload); err != nil {
+		t.Fatal(err)
+	}
+	tool := payload["tools"].([]any)[0].(map[string]any)
+	domains := tool["filters"].(map[string]any)["excluded_domains"].([]any)
+	if len(domains) != 1 || domains[0] != "blocked.example" {
+		t.Fatalf("excluded_domains = %#v", tool)
+	}
+}
+
+func TestConvertChatValidatesWebSearchDomainFilters(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		tool    string
+		wantErr bool
+	}{
+		{name: "identical nested and top level", tool: `{"type":"web_search","filters":{"allowed_domains":["same.example"]},"allowed_domains":["same.example"]}`},
+		{name: "conflicting duplicate", tool: `{"type":"web_search","filters":{"allowed_domains":["nested.example"]},"allowed_domains":["top.example"]}`, wantErr: true},
+		{name: "allow and exclude", tool: `{"type":"web_search","filters":{"allowed_domains":["allow.example"],"excluded_domains":["deny.example"]}}`, wantErr: true},
+		{name: "six domains", tool: `{"type":"web_search","excluded_domains":["a.example","b.example","c.example","d.example","e.example","f.example"]}`, wantErr: true},
+		{name: "invalid filters type", tool: `{"type":"web_search","filters":"invalid"}`, wantErr: true},
+		{name: "empty filters omitted", tool: `{"type":"web_search","filters":{"allowed_domains":null,"excluded_domains":[]}}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			converted, err := ConvertRequest([]byte(`{
+				"model":"public-chat","messages":[{"role":"user","content":"search"}],
+				"tools":[`+test.tool+`]
+			}`), "grok-4.6", OperationChat)
+			if (err != nil) != test.wantErr {
+				t.Fatalf("conversion error = %v, wantErr %v", err, test.wantErr)
+			}
+			if err != nil {
+				return
+			}
+			var payload map[string]any
+			if err := json.Unmarshal(converted, &payload); err != nil {
+				t.Fatal(err)
+			}
+			tool := payload["tools"].([]any)[0].(map[string]any)
+			if test.name == "empty filters omitted" && len(tool) != 1 {
+				t.Fatalf("empty filters were not omitted: %#v", tool)
+			}
+		})
 	}
 }
 
@@ -375,7 +432,7 @@ func TestConvertAnthropicClaudeCodeRequestToResponses(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !options.AnthropicThinking {
+	if !options.AnthropicThinking || !options.ReasoningEffortSet || options.ReasoningEffort != "high" {
 		t.Fatal("thinking option 未保留")
 	}
 	var payload map[string]any
@@ -404,6 +461,21 @@ func TestConvertAnthropicClaudeCodeRequestToResponses(t *testing.T) {
 	}
 }
 
+func TestConvertAnthropicDisabledThinkingReportsNoneMetadata(t *testing.T) {
+	body := []byte(`{
+		"model":"public-chat","max_tokens":1024,
+		"messages":[{"role":"user","content":"hello"}],
+		"thinking":{"type":"disabled"}
+	}`)
+	_, options, err := ConvertRequestWithOptions(body, "grok-4.3", OperationMessages)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if options.AnthropicThinking || !options.ReasoningEffortSet || options.ReasoningEffort != "none" {
+		t.Fatalf("options = %#v", options)
+	}
+}
+
 func TestConvertAnthropicMessagesPreservesExtendedReasoningEffort(t *testing.T) {
 	for _, effort := range []string{"xhigh", "max"} {
 		t.Run(effort, func(t *testing.T) {
@@ -426,6 +498,26 @@ func TestConvertAnthropicMessagesPreservesExtendedReasoningEffort(t *testing.T) 
 				t.Fatalf("reasoning = %#v", payload["reasoning"])
 			}
 		})
+	}
+}
+
+func TestConvertAnthropicMessagesUsesThinkingEffortBeforeBudget(t *testing.T) {
+	body := []byte(`{
+		"model":"public-chat","max_tokens":1024,
+		"messages":[{"role":"user","content":"hello"}],
+		"thinking":{"type":"enabled","effort":"high","budget_tokens":1024}
+	}`)
+	converted, options, err := ConvertRequestWithOptions(body, "grok-4.5", OperationMessages)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if json.Unmarshal(converted, &payload) != nil {
+		t.Fatalf("converted = %s", converted)
+	}
+	reasoning, _ := payload["reasoning"].(map[string]any)
+	if reasoning["effort"] != "high" || !options.ReasoningEffortSet || options.ReasoningEffort != "high" {
+		t.Fatalf("reasoning = %#v, options = %#v", reasoning, options)
 	}
 }
 
@@ -511,6 +603,28 @@ func TestConvertAnthropicWebSearchControls(t *testing.T) {
 	tool = payload["tools"].([]any)[0].(map[string]any)
 	if len(tool) != 1 || tool["type"] != "web_search" {
 		t.Fatalf("downgraded tool = %#v", tool)
+	}
+
+	converted, _, err = ConvertRequestWithOptions([]byte(`{
+		"model":"public","max_tokens":64,"messages":[{"role":"user","content":"search"}],
+		"tools":[{"type":"web_search_20250305","name":"web_search","blocked_domains":["blocked.example"]}]
+	}`), "grok-4.6", OperationMessages)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload = nil
+	_ = json.Unmarshal(converted, &payload)
+	tool = payload["tools"].([]any)[0].(map[string]any)
+	domains = tool["filters"].(map[string]any)["excluded_domains"].([]any)
+	if len(domains) != 1 || domains[0] != "blocked.example" {
+		t.Fatalf("blocked_domains conversion = %#v", tool)
+	}
+
+	if _, _, err = ConvertRequestWithOptions([]byte(`{
+		"model":"public","max_tokens":64,"messages":[{"role":"user","content":"search"}],
+		"tools":[{"type":"web_search_20250305","name":"web_search","allowed_domains":["allow.example"],"blocked_domains":["blocked.example"]}]
+	}`), "grok-4.6", OperationMessages); err == nil {
+		t.Fatal("allowed_domains + blocked_domains must be rejected")
 	}
 }
 
@@ -784,6 +898,319 @@ func TestConvertResponsesStreamChatErrorIsTerminal(t *testing.T) {
 	}
 	if strings.Count(value, "data: [DONE]") != 1 {
 		t.Fatalf("error stream must send one terminator: %s", value)
+	}
+}
+
+func TestConvertResponsesStreamMarksChatReasoningStart(t *testing.T) {
+	stream := strings.Join([]string{
+		`event: response.created`,
+		`data: {"type":"response.created","response":{"id":"resp_1","model":"grok-4.6"}}`, "",
+		`event: response.output_item.added`,
+		`data: {"type":"response.output_item.added","item":{"id":"rs_1","type":"reasoning","status":"in_progress"}}`, "",
+		`event: response.output_item.added`,
+		`data: {"type":"response.output_item.added","item":{"id":"rs_1","type":"reasoning"}}`, "",
+		`event: response.output_text.delta`,
+		`data: {"type":"response.output_text.delta","delta":"hi"}`, "",
+		`event: response.completed`,
+		`data: {"type":"response.completed","response":{"status":"completed"}}`, "", "",
+	}, "\n")
+	converted, err := io.ReadAll(ConvertResponseStream(io.NopCloser(strings.NewReader(stream)), OperationChat))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(converted)
+	if strings.Count(text, ": grok2api-reasoning-start\n\n") != 1 {
+		t.Fatalf("expected one reasoning start marker: %s", text)
+	}
+	if strings.Contains(text, "reasoning_started") {
+		t.Fatalf("internal timing marker leaked into Chat JSON: %s", text)
+	}
+	if !strings.Contains(text, `"content":"hi"`) {
+		t.Fatalf("missing visible content: %s", text)
+	}
+}
+
+func TestConvertResponsesStreamMarksEncryptedChatReasoningEvidence(t *testing.T) {
+	stream := strings.Join([]string{
+		`event: response.created`,
+		`data: {"type":"response.created","response":{"id":"resp_1","model":"grok-4.6"}}`, "",
+		`event: response.output_item.added`,
+		`data: {"type":"response.output_item.added","item":{"id":"rs_1","type":"reasoning"}}`, "",
+		`event: response.output_item.done`,
+		`data: {"type":"response.output_item.done","item":{"id":"rs_1","type":"reasoning","encrypted_content":"signature"}}`, "",
+		`event: response.completed`,
+		`data: {"type":"response.completed","response":{"status":"completed"}}`, "", "",
+	}, "\n")
+	converted, err := io.ReadAll(ConvertResponseStream(io.NopCloser(strings.NewReader(stream)), OperationChat))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(converted)
+	if strings.Count(text, ": grok2api-reasoning-start\n\n") != 1 || strings.Count(text, ": grok2api-reasoning-evidence 9\n\n") != 1 {
+		t.Fatalf("encrypted reasoning markers missing or duplicated: %s", text)
+	}
+	if strings.Contains(text, "signature") || strings.Contains(text, "encrypted_content") {
+		t.Fatalf("encrypted reasoning leaked into Chat JSON: %s", text)
+	}
+}
+
+func TestConvertResponsesStreamMarksFinalEnvelopeReasoningEvidence(t *testing.T) {
+	stream := strings.Join([]string{
+		`event: response.created`,
+		`data: {"type":"response.created","response":{"id":"resp_1","model":"grok-4.6"}}`, "",
+		`event: response.completed`,
+		`data: {"type":"response.completed","response":{"status":"completed","output":[{"id":"rs_1","type":"reasoning","encrypted_content":"signature"}]}}`, "", "",
+	}, "\n")
+	converted, err := io.ReadAll(ConvertResponseStream(io.NopCloser(strings.NewReader(stream)), OperationChat))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(converted)
+	if strings.Count(text, ": grok2api-reasoning-evidence 9\n\n") != 1 {
+		t.Fatalf("final-envelope reasoning evidence missing or duplicated: %s", text)
+	}
+	if strings.Contains(text, "signature") || strings.Contains(text, "encrypted_content") {
+		t.Fatalf("final-envelope encrypted reasoning leaked into Chat JSON: %s", text)
+	}
+}
+
+func TestConvertResponsesStreamChatFirstWinsSummaryDropsRaw(t *testing.T) {
+	stream := strings.Join([]string{
+		`event: response.created`,
+		`data: {"type":"response.created","response":{"id":"resp_1","model":"grok-4.6"}}`, "",
+		`event: response.output_item.added`,
+		`data: {"type":"response.output_item.added","item":{"id":"rs_1","type":"reasoning"}}`, "",
+		`event: response.reasoning_summary_text.delta`,
+		`data: {"type":"response.reasoning_summary_text.delta","item_id":"rs_1","delta":"summary "}`, "",
+		`event: response.reasoning_summary_text.delta`,
+		`data: {"type":"response.reasoning_summary_text.delta","item_id":"rs_1","delta":"live"}`, "",
+		`event: response.reasoning_text.delta`,
+		`data: {"type":"response.reasoning_text.delta","item_id":"rs_1","delta":"raw reasoning"}`, "",
+		`event: response.output_item.done`,
+		`data: {"type":"response.output_item.done","item":{"id":"rs_1","type":"reasoning"}}`, "",
+		`event: response.completed`,
+		`data: {"type":"response.completed","response":{"status":"completed"}}`, "", "",
+	}, "\n")
+	converted, err := io.ReadAll(ConvertResponseStream(io.NopCloser(strings.NewReader(stream)), OperationChat))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(converted)
+	if strings.Count(text, `"reasoning_content":"summary "`) != 1 || strings.Count(text, `"reasoning_content":"live"`) != 1 {
+		t.Fatalf("summary must stream live: %s", text)
+	}
+	if strings.Contains(text, `"reasoning_content":"raw reasoning"`) {
+		t.Fatalf("raw must be dropped after summary: %s", text)
+	}
+}
+
+func TestConvertResponsesStreamChatEmitsSummaryBeforeEOF(t *testing.T) {
+	streamPrefix := strings.Join([]string{
+		`event: response.reasoning_summary_text.delta`,
+		`data: {"type":"response.reasoning_summary_text.delta","delta":"summary only"}`, "", "",
+	}, "\n")
+	assertConvertedStreamContainsBeforeUpstreamClose(
+		t, OperationChat, ResponseOptions{}, streamPrefix, `"reasoning_content":"summary only"`,
+	)
+}
+
+func TestConvertResponsesStreamChatAdoptsLateReasoningItemID(t *testing.T) {
+	stream := strings.Join([]string{
+		`event: response.reasoning_summary_text.delta`,
+		`data: {"type":"response.reasoning_summary_text.delta","delta":"summary"}`, "",
+		`event: response.output_item.added`,
+		`data: {"type":"response.output_item.added","item":{"id":"rs_1","type":"reasoning"}}`, "",
+		`event: response.reasoning_text.delta`,
+		`data: {"type":"response.reasoning_text.delta","item_id":"rs_1","delta":"raw"}`, "",
+		`event: response.output_item.done`,
+		`data: {"type":"response.output_item.done","item":{"id":"rs_1","type":"reasoning"}}`, "",
+		`event: response.completed`,
+		`data: {"type":"response.completed","response":{"status":"completed"}}`, "", "",
+	}, "\n")
+	converted, err := io.ReadAll(ConvertResponseStream(io.NopCloser(strings.NewReader(stream)), OperationChat))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(converted)
+	if strings.Count(text, `"reasoning_content":"summary"`) != 1 || strings.Contains(text, `"reasoning_content":"raw"`) {
+		t.Fatalf("late item_id must keep first-wins summary: %s", text)
+	}
+}
+
+func TestConvertResponsesStreamMessagesFirstWinsSummaryDropsRaw(t *testing.T) {
+	stream := strings.Join([]string{
+		`event: response.created`,
+		`data: {"type":"response.created","response":{"id":"resp_1","model":"grok-4.6"}}`, "",
+		`event: response.output_item.added`,
+		`data: {"type":"response.output_item.added","item":{"id":"rs_1","type":"reasoning"}}`, "",
+		`event: response.reasoning_summary_text.delta`,
+		`data: {"type":"response.reasoning_summary_text.delta","item_id":"rs_1","delta":"duplicated summary"}`, "",
+		`event: response.reasoning_text.delta`,
+		`data: {"type":"response.reasoning_text.delta","item_id":"rs_1","delta":"raw reasoning"}`, "",
+		`event: response.output_item.done`,
+		`data: {"type":"response.output_item.done","item":{"id":"rs_1","type":"reasoning","encrypted_content":"signature"}}`, "",
+		`event: response.completed`,
+		`data: {"type":"response.completed","response":{"status":"completed"}}`, "", "",
+	}, "\n")
+	converted, err := io.ReadAll(ConvertResponseStreamWithOptions(
+		io.NopCloser(strings.NewReader(stream)), OperationMessages, ResponseOptions{AnthropicThinking: true},
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(converted)
+	if strings.Contains(text, "raw reasoning") {
+		t.Fatalf("raw leaked after summary was selected: %s", text)
+	}
+	reasoningAt := strings.Index(text, `"thinking":"duplicated summary"`)
+	signatureAt := strings.Index(text, `"signature":"signature"`)
+	stopAt := strings.Index(text, `"type":"content_block_stop"`)
+	if reasoningAt < 0 || signatureAt < reasoningAt || stopAt < signatureAt {
+		t.Fatalf("thinking/signature/block-stop order is invalid: %s", text)
+	}
+}
+
+func TestConvertResponsesStreamMessagesEmitsSummaryBeforeItemDone(t *testing.T) {
+	streamPrefix := strings.Join([]string{
+		`event: response.output_item.added`,
+		`data: {"type":"response.output_item.added","item":{"id":"rs_1","type":"reasoning"}}`, "",
+		`event: response.reasoning_summary_text.delta`,
+		`data: {"type":"response.reasoning_summary_text.delta","item_id":"rs_1","delta":"live thought"}`, "", "",
+	}, "\n")
+	assertConvertedStreamContainsBeforeUpstreamClose(
+		t, OperationMessages, ResponseOptions{AnthropicThinking: true}, streamPrefix, `"thinking":"live thought"`,
+	)
+}
+
+func TestConvertResponsesStreamMessagesRawFirstDropsSummary(t *testing.T) {
+	stream := strings.Join([]string{
+		`event: response.output_item.added`,
+		`data: {"type":"response.output_item.added","item":{"id":"rs_1","type":"reasoning"}}`, "",
+		`event: response.reasoning_text.delta`,
+		`data: {"type":"response.reasoning_text.delta","item_id":"rs_1","delta":"raw first"}`, "",
+		`event: response.reasoning_summary_text.delta`,
+		`data: {"type":"response.reasoning_summary_text.delta","item_id":"rs_1","delta":"later summary"}`, "",
+		`event: response.output_item.done`,
+		`data: {"type":"response.output_item.done","item":{"id":"rs_1","type":"reasoning","encrypted_content":"signature"}}`, "",
+		`event: response.completed`,
+		`data: {"type":"response.completed","response":{"status":"completed"}}`, "", "",
+	}, "\n")
+	converted, err := io.ReadAll(ConvertResponseStreamWithOptions(
+		io.NopCloser(strings.NewReader(stream)), OperationMessages, ResponseOptions{AnthropicThinking: true},
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(converted)
+	if strings.Contains(text, "later summary") || !strings.Contains(text, `"thinking":"raw first"`) {
+		t.Fatalf("raw-first must drop summary: %s", text)
+	}
+}
+
+func TestConvertResponsesStreamMessagesEmitsSignatureWhenEncryptedArrives(t *testing.T) {
+	streamPrefix := strings.Join([]string{
+		`event: response.output_item.added`,
+		`data: {"type":"response.output_item.added","item":{"id":"rs_1","type":"reasoning","encrypted_content":"  early-sig  "}}`, "", "",
+	}, "\n")
+	assertConvertedStreamContainsBeforeUpstreamClose(
+		t, OperationMessages, ResponseOptions{AnthropicThinking: true}, streamPrefix, `"signature":"  early-sig  "`,
+	)
+}
+
+func TestConvertResponsesStreamMessagesDoesNotDuplicateEarlySignature(t *testing.T) {
+	stream := strings.Join([]string{
+		`event: response.output_item.added`,
+		`data: {"type":"response.output_item.added","item":{"id":"rs_1","type":"reasoning","encrypted_content":"early-sig"}}`, "",
+		`event: response.output_item.done`,
+		`data: {"type":"response.output_item.done","item":{"id":"rs_1","type":"reasoning","encrypted_content":"early-sig"}}`, "",
+		`event: response.completed`,
+		`data: {"type":"response.completed","response":{"status":"completed"}}`, "", "",
+	}, "\n")
+	converted, err := io.ReadAll(ConvertResponseStreamWithOptions(
+		io.NopCloser(strings.NewReader(stream)), OperationMessages, ResponseOptions{AnthropicThinking: true},
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(converted)
+	if strings.Count(text, `"signature":"early-sig"`) != 1 {
+		t.Fatalf("early encrypted_content must emit exactly once: %s", text)
+	}
+}
+
+func TestConvertResponsesStreamMessagesKeepsRicherLateReasoningEvidence(t *testing.T) {
+	stream := strings.Join([]string{
+		`event: response.output_item.added`,
+		`data: {"type":"response.output_item.added","item":{"id":"rs_1","type":"reasoning","encrypted_content":"early"}}`, "",
+		`event: response.output_item.done`,
+		`data: {"type":"response.output_item.done","item":{"id":"rs_1","type":"reasoning","encrypted_content":"later-signature"}}`, "",
+		`event: response.completed`,
+		`data: {"type":"response.completed","response":{"status":"completed"}}`, "", "",
+	}, "\n")
+	converted, err := io.ReadAll(ConvertResponseStreamWithOptions(
+		io.NopCloser(strings.NewReader(stream)), OperationMessages, ResponseOptions{AnthropicThinking: true},
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(converted)
+	if strings.Count(text, ": grok2api-reasoning-evidence 5\n\n") != 1 ||
+		strings.Count(text, ": grok2api-reasoning-evidence 15\n\n") != 1 {
+		t.Fatalf("late encrypted_content length must update reasoning evidence: %s", text)
+	}
+	if strings.Count(text, `"signature":"early"`) != 1 || strings.Contains(text, `"signature":"later-signature"`) {
+		t.Fatalf("only the first encrypted_content must be emitted publicly: %s", text)
+	}
+}
+
+func assertConvertedStreamContainsBeforeUpstreamClose(
+	t *testing.T,
+	operation string,
+	options ResponseOptions,
+	streamPrefix string,
+	want string,
+) {
+	t.Helper()
+	upstreamReader, upstreamWriter := io.Pipe()
+	converted := ConvertResponseStreamWithOptions(upstreamReader, operation, options)
+	t.Cleanup(func() {
+		_ = converted.Close()
+		_ = upstreamWriter.Close()
+	})
+
+	go func() {
+		_, _ = io.WriteString(upstreamWriter, streamPrefix)
+	}()
+
+	type readResult struct {
+		output string
+		err    error
+	}
+	results := make(chan readResult, 1)
+	go func() {
+		reader := bufio.NewReader(converted)
+		var output strings.Builder
+		for {
+			line, err := reader.ReadString('\n')
+			output.WriteString(line)
+			if strings.Contains(output.String(), want) {
+				results <- readResult{output: output.String()}
+				return
+			}
+			if err != nil {
+				results <- readResult{output: output.String(), err: err}
+				return
+			}
+		}
+	}()
+
+	select {
+	case result := <-results:
+		if result.err != nil {
+			t.Fatalf("converted stream closed before %q arrived: %v; output=%s", want, result.err, result.output)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("converted stream did not emit %q while upstream remained open", want)
 	}
 }
 

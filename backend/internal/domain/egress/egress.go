@@ -31,6 +31,8 @@ type Node struct {
 	SourceID                    uint64
 	SourceKey                   string
 	AccountCapacity             int
+	ProxyProfileID              uint64
+	ProxyProfileName            string
 	EncryptedProxyURL           string
 	UserAgent                   string
 	EncryptedCloudflareCookie   string
@@ -60,9 +62,13 @@ type PublicNode struct {
 	Scope                Scope
 	Enabled              bool
 	ProxyConfigured      bool
+	ProxyDisplay         string
+	ProxyFingerprint     string
 	ProxyPool            bool
 	SourceID             uint64
 	AccountCapacity      int
+	ProxyProfileID       uint64
+	ProxyProfileName     string
 	UserAgent            string
 	CookieConfigured     bool
 	AccountBoundProxy    bool
@@ -81,6 +87,27 @@ type PublicNode struct {
 	AssignedAccountCount int
 	CreatedAt            time.Time
 	UpdatedAt            time.Time
+}
+
+// ProxyProfile is a reusable physical proxy configuration. Provider-specific
+// health, capacity, browser identity, and Clearance remain on Node.
+type ProxyProfile struct {
+	ID                uint64
+	Name              string
+	EncryptedProxyURL string
+	BoundNodeCount    int
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
+}
+
+type PublicProxyProfile struct {
+	ID               uint64
+	Name             string
+	ProxyDisplay     string
+	ProxyFingerprint string
+	BoundNodeCount   int
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
 }
 
 type ProbeStatus string
@@ -131,6 +158,7 @@ type SubscriptionSource struct {
 	Scope                  Scope
 	Enabled                bool
 	EncryptedURL           string
+	EncryptedProxyURL      string
 	RefreshIntervalSeconds int
 	DefaultAccountCapacity int
 	LastSyncedAt           *time.Time
@@ -147,6 +175,7 @@ type PublicSubscriptionSource struct {
 	Scope                  Scope
 	Enabled                bool
 	URLConfigured          bool
+	ProxyConfigured        bool
 	RefreshIntervalSeconds int
 	DefaultAccountCapacity int
 	LastSyncedAt           *time.Time
@@ -218,11 +247,8 @@ type OperationsConfig struct {
 	AutoAssignEnabled         bool
 	AutoBalanceEnabled        bool
 	AssignmentIntervalSeconds int
-	// EncryptedSubscriptionProxyURL is the optional proxy used only when
-	// fetching remote proxy subscription sources. It is write-only at rest.
-	EncryptedSubscriptionProxyURL string
-	Fallbacks                     map[Scope]FallbackConfig
-	UpdatedAt                     time.Time
+	Fallbacks                 map[Scope]FallbackConfig
+	UpdatedAt                 time.Time
 }
 
 func DefaultOperationsConfig() OperationsConfig {

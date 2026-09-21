@@ -27,6 +27,7 @@ export function SettingsPage() {
   const [autoCleanConfirm, setAutoCleanConfirm] = useState<"enabled" | "includeDisabled" | null>(null);
   const [unlimitedAttemptsConfirm, setUnlimitedAttemptsConfirm] = useState(false);
   const limitedRoutingAttemptsRef = useRef(3);
+  const limitedVideoRoutingAttemptsRef = useRef(999);
   const autoCleanEnabled = form.watch("accounts.autoCleanReauthEnabled") === true;
   const buildForbiddenReauthEnabled = form.watch("accounts.markBuildForbiddenReauth") === true;
   const segmentedSelectorEnabled = form.watch("routing.segmentedSelector.enabled") === true;
@@ -84,6 +85,7 @@ export function SettingsPage() {
             <TabsTrigger className="h-9 w-auto shrink-0 justify-start rounded-md px-3 text-xs data-[state=active]:font-medium lg:w-full" value="console">{t("console.name")}</TabsTrigger>
             <TabsTrigger className="h-9 w-auto shrink-0 justify-start rounded-md px-3 text-xs data-[state=active]:font-medium lg:w-full" value="delivery">{t("settings.groups.delivery")}</TabsTrigger>
             <TabsTrigger className="h-9 w-auto shrink-0 justify-start rounded-md px-3 text-xs data-[state=active]:font-medium lg:w-full" value="policies">{t("settings.groups.policies")}</TabsTrigger>
+            <TabsTrigger className="h-9 w-auto shrink-0 justify-start rounded-md px-3 text-xs data-[state=active]:font-medium lg:w-full" value="audit">{t("settings.audit.tabTitle")}</TabsTrigger>
             <TabsTrigger className="h-9 w-auto shrink-0 justify-start rounded-md px-3 text-xs data-[state=active]:font-medium lg:w-full" value="accounts">{t("settings.accounts.title")}</TabsTrigger>
             <TabsTrigger className="h-9 w-auto shrink-0 justify-start rounded-md px-3 text-xs data-[state=active]:font-medium lg:w-full" value="about">{t("updates.title")}</TabsTrigger>
           </TabsList>
@@ -144,6 +146,7 @@ export function SettingsPage() {
               <SettingsField controlId="web-stream-idle-timeout" label={t("settings.web.streamIdleTimeout")} description={t("settings.web.streamIdleTimeoutHelp")} error={form.formState.errors.providerWeb?.streamIdleTimeout?.message}><Controller control={form.control} name="providerWeb.streamIdleTimeout" render={({ field }) => <DurationInput id="web-stream-idle-timeout" value={field.value} onChange={field.onChange} />} /></SettingsField>
               <SettingsField controlId="web-image-timeout" label={t("settings.web.imageTimeout")} description={t("settings.web.imageTimeoutHelp")} error={form.formState.errors.providerWeb?.imageTimeout?.message}><Controller control={form.control} name="providerWeb.imageTimeout" render={({ field }) => <DurationInput id="web-image-timeout" value={field.value} onChange={field.onChange} />} /></SettingsField>
               <SettingsField controlId="web-video-timeout" label={t("settings.web.videoTimeout")} description={t("settings.web.videoTimeoutHelp")} error={form.formState.errors.providerWeb?.videoTimeout?.message}><Controller control={form.control} name="providerWeb.videoTimeout" render={({ field }) => <DurationInput id="web-video-timeout" value={field.value} onChange={field.onChange} />} /></SettingsField>
+              <SettingsField controlId="web-free-video-duration-cap" label={t("settings.web.freeVideoDurationCap")} description={t("settings.web.freeVideoDurationCapHelp")} error={form.formState.errors.providerWeb?.freeVideoDurationCap?.message}><Input id="web-free-video-duration-cap" type="number" min={1} max={15} {...form.register("providerWeb.freeVideoDurationCap", { valueAsNumber: true })} /></SettingsField>
               <SettingsField controlId="web-media-concurrency" label={t("settings.web.mediaConcurrency")} description={t("settings.web.mediaConcurrencyHelp")} badge={t("settings.restartRequired")} error={form.formState.errors.providerWeb?.mediaConcurrency?.message}><Input id="web-media-concurrency" type="number" min={1} max={64} {...form.register("providerWeb.mediaConcurrency", { valueAsNumber: true })} /></SettingsField>
               <SettingsField controlId="web-recovery-base" label={t("settings.web.recoveryBackoffBase")} description={t("settings.web.recoveryBackoffBaseHelp")} error={form.formState.errors.providerWeb?.recoveryBackoffBase?.message}><Controller control={form.control} name="providerWeb.recoveryBackoffBase" render={({ field }) => <DurationInput id="web-recovery-base" value={field.value} onChange={field.onChange} />} /></SettingsField>
               <SettingsField controlId="web-recovery-max" label={t("settings.web.recoveryBackoffMax")} description={t("settings.web.recoveryBackoffMaxHelp")} error={form.formState.errors.providerWeb?.recoveryBackoffMax?.message}><Controller control={form.control} name="providerWeb.recoveryBackoffMax" render={({ field }) => <DurationInput id="web-recovery-max" value={field.value} onChange={field.onChange} />} /></SettingsField>
@@ -191,17 +194,18 @@ export function SettingsPage() {
               <SettingsField controlId="egress-clearance-mode" className="sm:col-span-2" label={t("settings.web.clearanceMode")} description={t("settings.web.clearanceModeHelp")} error={form.formState.errors.providerWeb?.clearanceMode?.message}>
                 <Controller control={form.control} name="providerWeb.clearanceMode" render={({ field }) => (
                   <Tabs value={field.value} onValueChange={field.onChange}>
-                    <TabsList id="egress-clearance-mode" className="grid w-full grid-cols-2 bg-muted/55">
+                    <TabsList id="egress-clearance-mode" className="grid w-full grid-cols-3 bg-muted/55">
                       <TabsTrigger value="manual" className="font-normal">{t("settings.web.clearanceManual")}</TabsTrigger>
                       <TabsTrigger value="flaresolverr" className="font-normal">{t("settings.web.clearanceFlareSolverr")}</TabsTrigger>
+                      <TabsTrigger value="on_demand" className="font-normal">{t("settings.web.clearanceOnDemand")}</TabsTrigger>
                     </TabsList>
                   </Tabs>
                 )} />
               </SettingsField>
-              {draftClearanceMode === "flaresolverr" ? <>
+              {draftClearanceMode !== "manual" ? <>
                 <SettingsField controlId="egress-flaresolverr-url" className="sm:col-span-2" label={t("settings.web.flareSolverrURL")} description={t("settings.web.flareSolverrURLHelp")} error={form.formState.errors.providerWeb?.flareSolverrURL?.message}><Input id="egress-flaresolverr-url" type="url" placeholder="http://flaresolverr:8191" {...form.register("providerWeb.flareSolverrURL")} /></SettingsField>
                 <SettingsField controlId="egress-clearance-timeout" label={t("settings.web.clearanceTimeout")} description={t("settings.web.clearanceTimeoutHelp")} error={form.formState.errors.providerWeb?.clearanceTimeout?.message}><Controller control={form.control} name="providerWeb.clearanceTimeout" render={({ field }) => <DurationInput id="egress-clearance-timeout" value={field.value} onChange={field.onChange} />} /></SettingsField>
-                <SettingsField controlId="egress-clearance-refresh" label={t("settings.web.clearanceRefresh")} description={t("settings.web.clearanceRefreshHelp")} error={form.formState.errors.providerWeb?.clearanceRefresh?.message}><Controller control={form.control} name="providerWeb.clearanceRefresh" render={({ field }) => <DurationInput id="egress-clearance-refresh" value={field.value} onChange={field.onChange} />} /></SettingsField>
+                {draftClearanceMode === "flaresolverr" ? <SettingsField controlId="egress-clearance-refresh" label={t("settings.web.clearanceRefresh")} description={t("settings.web.clearanceRefreshHelp")} error={form.formState.errors.providerWeb?.clearanceRefresh?.message}><Controller control={form.control} name="providerWeb.clearanceRefresh" render={({ field }) => <DurationInput id="egress-clearance-refresh" value={field.value} onChange={field.onChange} />} /></SettingsField> : null}
               </> : null}
             </div>
           </SettingsSection>
@@ -272,6 +276,44 @@ export function SettingsPage() {
                   );
                 }} />
               </SettingsField>
+              <SettingsField controlId="routing-video-max-attempts" label={t("settings.routing.videoMaxAttempts")} description={t("settings.routing.videoMaxAttemptsHelp")} error={form.formState.errors.routing?.videoMaxAttempts?.message}>
+                <Controller control={form.control} name="routing.videoMaxAttempts" render={({ field }) => {
+                  const unlimited = field.value === UNLIMITED_ROUTING_ATTEMPTS;
+                  return (
+                    <div className="flex h-9 items-center gap-3">
+                      <Input
+                        id="routing-video-max-attempts"
+                        ref={field.ref}
+                        name={field.name}
+                        type="number"
+                        min={1}
+                        max={MAX_ROUTING_ATTEMPTS}
+                        disabled={unlimited}
+                        value={unlimited || !Number.isFinite(field.value) || field.value <= 0 ? "" : field.value}
+                        placeholder={t("settingsRoutingAttempts.unlimited")}
+                        onBlur={field.onBlur}
+                        onChange={(event) => field.onChange(event.currentTarget.valueAsNumber)}
+                      />
+                      <div className="flex shrink-0 items-center gap-2">
+                        <span className="text-xs text-muted-foreground">{t("settingsRoutingAttempts.unlimited")}</span>
+                        <Switch
+                          id="routing-video-max-attempts-unlimited"
+                          aria-label={t("settingsRoutingAttempts.unlimited")}
+                          checked={unlimited}
+                          onCheckedChange={(checked) => {
+                            if (checked) {
+                              if (field.value > 0) limitedVideoRoutingAttemptsRef.current = field.value;
+                              field.onChange(UNLIMITED_ROUTING_ATTEMPTS);
+                              return;
+                            }
+                            field.onChange(limitedVideoRoutingAttemptsRef.current);
+                          }}
+                        />
+                      </div>
+                    </div>
+                  );
+                }} />
+              </SettingsField>
               <SettingsField controlId="routing-prefer-free-build" label={t("settings.routing.preferFreeBuild")} description={t("settings.routing.preferFreeBuildHelp")}><Controller control={form.control} name="routing.preferFreeBuild" render={({ field }) => <div className="flex h-9 items-center"><Switch id="routing-prefer-free-build" checked={field.value} onCheckedChange={field.onChange} /></div>} /></SettingsField>
               <SettingsField controlId="routing-mark-build-chat-denied-as-reauth" label={t("settings.routing.markBuildChatDeniedAsReauth")} description={t("settings.routing.markBuildChatDeniedAsReauthHelp")}><Controller control={form.control} name="routing.markBuildChatDeniedAsReauth" render={({ field }) => <div className="flex h-9 items-center"><Switch id="routing-mark-build-chat-denied-as-reauth" checked={field.value} onCheckedChange={field.onChange} /></div>} /></SettingsField>
               <SettingsField controlId="routing-account-isolated-connections" label={t("settings.routing.accountIsolatedConnections")} description={t("settings.routing.accountIsolatedConnectionsHelp")}><Controller control={form.control} name="routing.accountIsolatedConnections" render={({ field }) => <div className="flex h-9 items-center"><Switch id="routing-account-isolated-connections" checked={field.value} onCheckedChange={field.onChange} /></div>} /></SettingsField>
@@ -301,21 +343,96 @@ export function SettingsPage() {
             </AlertDialog>
           </SettingsSection>
 
-          <SettingsSection title={t("settings.audit.title")}>
-            <div className="space-y-0">
-              <SettingsField controlId="audit-buffer-size" label={t("settings.audit.bufferSize")} description={t("settings.audit.bufferSizeHelp")} badge={t("settings.restartRequired")} error={form.formState.errors.audit?.bufferSize?.message}><Input id="audit-buffer-size" type="number" min={1} max={262_144} {...form.register("audit.bufferSize", { valueAsNumber: true })} /></SettingsField>
-              <SettingsField controlId="audit-batch-size" label={t("settings.audit.batchSize")} description={t("settings.audit.batchSizeHelp")} error={form.formState.errors.audit?.batchSize?.message}><Input id="audit-batch-size" type="number" min={1} max={4_096} {...form.register("audit.batchSize", { valueAsNumber: true })} /></SettingsField>
-              <SettingsField controlId="audit-flush-interval" label={t("settings.audit.flushInterval")} description={t("settings.audit.flushIntervalHelp")} error={form.formState.errors.audit?.flushInterval?.message}><Controller control={form.control} name="audit.flushInterval" render={({ field }) => <DurationInput id="audit-flush-interval" value={field.value} onChange={field.onChange} />} /></SettingsField>
-              <SettingsField controlId="audit-commit-delay" label={t("settings.audit.commitDelay")} description={t("settings.audit.commitDelayHelp")} error={form.formState.errors.audit?.commitDelayMS?.message}><Input id="audit-commit-delay" type="number" min={1} max={50} {...form.register("audit.commitDelayMS", { valueAsNumber: true })} /></SettingsField>
-            </div>
-          </SettingsSection>
-
           <SettingsSection title={t("settings.clientKeys.title")}>
             <div className="space-y-0">
               <SettingsField controlId="client-key-default-rpm" label={t("settings.clientKeys.rpmLimit")} description={t("settings.clientKeys.rpmLimitHelp")} error={form.formState.errors.clientKeyDefaults?.rpmLimit?.message}><Input id="client-key-default-rpm" type="number" min={1} max={100_000} {...form.register("clientKeyDefaults.rpmLimit", { valueAsNumber: true })} /></SettingsField>
               <SettingsField controlId="client-key-default-concurrency" label={t("settings.clientKeys.maxConcurrent")} description={t("settings.clientKeys.maxConcurrentHelp")} error={form.formState.errors.clientKeyDefaults?.maxConcurrent?.message}><Input id="client-key-default-concurrency" type="number" min={1} max={1_024} {...form.register("clientKeyDefaults.maxConcurrent", { valueAsNumber: true })} /></SettingsField>
             </div>
           </SettingsSection>
+          </SettingsPane>
+
+          <SettingsPane value="audit">
+            <SettingsSection title={t("settings.audit.retentionTitle")}>
+              <div className="space-y-0">
+                <SettingsField
+                  controlId="audit-retention-days"
+                  label={t("settings.audit.retentionDays")}
+                  description={t("settings.audit.retentionDaysHelp")}
+                  error={form.formState.errors.audit?.retentionDays?.message}
+                >
+                  <Input
+                    id="audit-retention-days"
+                    type="number"
+                    min={0}
+                    max={365}
+                    {...form.register("audit.retentionDays", { valueAsNumber: true })}
+                  />
+                </SettingsField>
+
+              </div>
+            </SettingsSection>
+
+            <SettingsSection title={t("settings.audit.performanceTitle")}>
+              <div className="space-y-0">
+                <SettingsField
+                  controlId="audit-buffer-size"
+                  label={t("settings.audit.bufferSize")}
+                  description={t("settings.audit.bufferSizeHelp")}
+                  badge={t("settings.restartRequired")}
+                  error={form.formState.errors.audit?.bufferSize?.message}
+                >
+                  <Input
+                    id="audit-buffer-size"
+                    type="number"
+                    min={1}
+                    max={262_144}
+                    {...form.register("audit.bufferSize", { valueAsNumber: true })}
+                  />
+                </SettingsField>
+                <SettingsField
+                  controlId="audit-batch-size"
+                  label={t("settings.audit.batchSize")}
+                  description={t("settings.audit.batchSizeHelp")}
+                  error={form.formState.errors.audit?.batchSize?.message}
+                >
+                  <Input
+                    id="audit-batch-size"
+                    type="number"
+                    min={1}
+                    max={4_096}
+                    {...form.register("audit.batchSize", { valueAsNumber: true })}
+                  />
+                </SettingsField>
+                <SettingsField
+                  controlId="audit-flush-interval"
+                  label={t("settings.audit.flushInterval")}
+                  description={t("settings.audit.flushIntervalHelp")}
+                  error={form.formState.errors.audit?.flushInterval?.message}
+                >
+                  <Controller
+                    control={form.control}
+                    name="audit.flushInterval"
+                    render={({ field }) => (
+                      <DurationInput id="audit-flush-interval" value={field.value} onChange={field.onChange} />
+                    )}
+                  />
+                </SettingsField>
+                <SettingsField
+                  controlId="audit-commit-delay"
+                  label={t("settings.audit.commitDelay")}
+                  description={t("settings.audit.commitDelayHelp")}
+                  error={form.formState.errors.audit?.commitDelayMS?.message}
+                >
+                  <Input
+                    id="audit-commit-delay"
+                    type="number"
+                    min={1}
+                    max={50}
+                    {...form.register("audit.commitDelayMS", { valueAsNumber: true })}
+                  />
+                </SettingsField>
+              </div>
+            </SettingsSection>
           </SettingsPane>
 
           <SettingsPane value="accounts">

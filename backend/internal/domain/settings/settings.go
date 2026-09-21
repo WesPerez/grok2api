@@ -15,7 +15,18 @@ const (
 	DefaultConsoleStreamIdleTimeout = 2 * time.Minute
 	MinProviderStreamIdleTimeout    = 30 * time.Second
 	MaxProviderStreamIdleTimeout    = 10 * time.Minute
+
+	DefaultWebFreeVideoDurationCap = 6
+	MinWebFreeVideoDurationCap     = 1
+	MaxWebFreeVideoDurationCap     = 15
 )
+
+func NormalizeWebFreeVideoDurationCap(value int) int {
+	if value < MinWebFreeVideoDurationCap || value > MaxWebFreeVideoDurationCap {
+		return DefaultWebFreeVideoDurationCap
+	}
+	return value
+}
 
 // Config 表示可跨重启持久化并支持热加载的网关运行参数。
 type Config struct {
@@ -56,23 +67,24 @@ type MediaConfig struct {
 }
 
 type ProviderWebConfig struct {
-	BaseURL             string
-	StatsigMode         string
-	StatsigManualValue  string
-	StatsigSignerURL    string
-	ClearanceMode       string
-	FlareSolverrURL     string
-	ClearanceTimeout    time.Duration
-	ClearanceRefresh    time.Duration
-	QuotaTimeout        time.Duration
-	ChatTimeout         time.Duration
-	StreamIdleTimeout   time.Duration
-	ImageTimeout        time.Duration
-	VideoTimeout        time.Duration
-	MediaConcurrency    int
-	AllowNSFW           bool
-	RecoveryBackoffBase time.Duration
-	RecoveryBackoffMax  time.Duration
+	BaseURL              string
+	StatsigMode          string
+	StatsigManualValue   string
+	StatsigSignerURL     string
+	ClearanceMode        string
+	FlareSolverrURL      string
+	ClearanceTimeout     time.Duration
+	ClearanceRefresh     time.Duration
+	QuotaTimeout         time.Duration
+	ChatTimeout          time.Duration
+	StreamIdleTimeout    time.Duration
+	ImageTimeout         time.Duration
+	VideoTimeout         time.Duration
+	MediaConcurrency     int
+	AllowNSFW            bool
+	FreeVideoDurationCap int
+	RecoveryBackoffBase  time.Duration
+	RecoveryBackoffMax   time.Duration
 }
 
 // BatchConfig 定义账号导入、转换、同步和凭据刷新的并发上限。
@@ -98,12 +110,13 @@ type ProviderBuildConfig struct {
 
 // RoutingConfig 定义会话粘性、冷却和故障切换边界。
 type RoutingConfig struct {
-	StickyTTL       time.Duration
-	CooldownBase    time.Duration
-	CooldownMax     time.Duration
-	CapacityWait    time.Duration
-	MaxAttempts     int
-	PreferFreeBuild bool
+	StickyTTL        time.Duration
+	CooldownBase     time.Duration
+	CooldownMax      time.Duration
+	CapacityWait     time.Duration
+	MaxAttempts      int
+	VideoMaxAttempts int
+	PreferFreeBuild  bool
 	// MarkBuildChatDeniedAsReauth 为 true 时，Build chat 权限拒绝标 reauthRequired，默认 false 保留模型级冷却。
 	MarkBuildChatDeniedAsReauth bool
 	// AccountIsolatedConnections is optional so persisted payloads written by
@@ -123,6 +136,7 @@ type AuditConfig struct {
 	BatchSize     int
 	FlushInterval time.Duration
 	CommitDelay   time.Duration
+	RetentionDays *int
 }
 
 // ClientKeyDefaultsConfig 定义新建客户端密钥的默认限制。

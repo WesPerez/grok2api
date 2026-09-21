@@ -2,8 +2,10 @@ package inference
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"math"
 	"net/http"
@@ -17,8 +19,34 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/application/gateway"
 	clientkeydomain "github.com/chenyme/grok2api/backend/internal/domain/clientkey"
 	mediadomain "github.com/chenyme/grok2api/backend/internal/domain/media"
+	"github.com/chenyme/grok2api/backend/internal/pkg/neterror"
 	"github.com/gin-gonic/gin"
 )
+
+type idleErrorReader struct{}
+
+func (idleErrorReader) Read([]byte) (int, error) {
+	return 0, neterror.ErrUpstreamStreamIdleTimeout
+}
+
+type outputLoopErrorReader struct{}
+
+func (outputLoopErrorReader) Read([]byte) (int, error) {
+	return 0, fmt.Errorf("%w (repeated content delta 129 times)", neterror.ErrUpstreamOutputLoop)
+}
+
+type chunkErrorReader struct {
+	data []byte
+	done bool
+}
+
+func (r *chunkErrorReader) Read(target []byte) (int, error) {
+	if r.done {
+		return 0, io.EOF
+	}
+	r.done = true
+	return copy(target, r.data), errors.New("upstream cut")
+}
 
 func TestVideoGenerationUsesOfficialXAIEndpointsAndFields(t *testing.T) {
 	gin.SetMode(gin.TestMode)
@@ -119,9 +147,29 @@ func TestWriteVideoContentRejectsDeclaredOversizeMedia(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()
 	context, _ := gin.CreateTestContext(recorder)
-	writeVideoContent(context, strings.NewReader("ignored"), "video/mp4", maxMediaResponseTransferBytes+1)
+	writeVideoContent(context, strings.NewReader("ignored"), "video/mp4", maxMediaResponseTransferBytes+1, "video_request_1")
 	if recorder.Code != http.StatusBadGateway || !strings.Contains(recorder.Body.String(), "media_too_large") {
 		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+// A saved response needs an extension or the file will not open in a player.
+func TestWriteVideoContentNamesDownloadWithExtension(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, testCase := range []struct {
+		contentType string
+		want        string
+	}{
+		{"video/mp4", `inline; filename="video_request_1.mp4"`},
+		{"video/webm", `inline; filename="video_request_1.webm"`},
+		{"video/quicktime", `inline; filename="video_request_1.mov"`},
+	} {
+		recorder := httptest.NewRecorder()
+		context, _ := gin.CreateTestContext(recorder)
+		writeVideoContent(context, strings.NewReader("body"), testCase.contentType, 4, "video_request_1")
+		if got := recorder.Header().Get("Content-Disposition"); got != testCase.want {
+			t.Fatalf("%s disposition = %q, want %q", testCase.contentType, got, testCase.want)
+		}
 	}
 }
 
@@ -131,6 +179,32 @@ func TestVideoContentURLUsesConfiguredPublicAPIBase(t *testing.T) {
 	video, ok := response["video"].(gin.H)
 	if !ok || video["url"] != "https://api.example.com/grok2api/v1/videos/video_request_1/content" {
 		t.Fatalf("response = %#v", response)
+	}
+}
+
+// A completed job whose local asset has been verified by the gateway must point
+// at the public media route. /v1/videos/{id}/content requires the client API key
+// and is therefore not usable in a browser or player.
+func TestVideoPlaybackURLPrefersPublicAssetRoute(t *testing.T) {
+	handler := NewHandler(nil, nil, 1<<20, "https://api.example.com/grok2api/")
+	job := mediadomain.Job{
+		ID: "video_request_1", Status: mediadomain.StatusCompleted,
+		UpstreamURL: "https://assets.grok.com/source.mp4", ResultAssetID: "vid_abc123",
+	}
+	response := videoGenerationResponse(job, handler.videoPlaybackURL(job))
+	video, ok := response["video"].(gin.H)
+	if !ok || video["url"] != "https://api.example.com/grok2api/v1/media/videos/vid_abc123" {
+		t.Fatalf("response = %#v", response)
+	}
+}
+
+// Without a readable stored asset the protected content endpoint remains the
+// only option and can still fall back to the upstream download path.
+func TestVideoPlaybackURLFallsBackToContentEndpoint(t *testing.T) {
+	handler := NewHandler(nil, nil, 1<<20, "https://api.example.com/grok2api/")
+	job := mediadomain.Job{ID: "video_request_1", Status: mediadomain.StatusCompleted}
+	if got := handler.videoPlaybackURL(job); got != "https://api.example.com/grok2api/v1/videos/video_request_1/content" {
+		t.Fatalf("fallback URL = %q", got)
 	}
 }
 
@@ -170,6 +244,19 @@ func TestGatewayErrorMapsOversizedVideoInputToBadRequest(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	router.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/", nil))
 	if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), `"code":"invalid_request"`) || !strings.Contains(recorder.Body.String(), "32 MiB") {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestGatewayErrorMapsInvalidVideoParametersToBadRequest(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.GET("/", func(c *gin.Context) {
+		writeGatewayError(c, fmt.Errorf("%w: Console reference_images 最多 7 张", gateway.ErrVideoParameterInvalid))
+	})
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/", nil))
+	if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), `"code":"invalid_request"`) || !strings.Contains(recorder.Body.String(), "最多 7 张") {
 		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
 }
@@ -344,6 +431,114 @@ func TestDirectUpstreamCredentialResponsesAreRewritten(t *testing.T) {
 	}
 }
 
+func TestNonStreamingEmptyAndIdleResponsesFailBeforeCommittingSuccess(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	handler := NewHandler(nil, nil, 1<<20)
+	for _, test := range []struct {
+		name       string
+		body       io.ReadCloser
+		wantStatus int
+		wantCode   string
+	}{
+		{name: "empty", body: io.NopCloser(strings.NewReader("")), wantStatus: http.StatusBadGateway, wantCode: "upstream_response_empty"},
+		{name: "idle", body: io.NopCloser(idleErrorReader{}), wantStatus: http.StatusGatewayTimeout, wantCode: "upstream_stream_idle_timeout"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			finalCode := ""
+			result := &gateway.Result{
+				StatusCode: http.StatusOK, Status: "200 OK", Header: http.Header{"Content-Type": {"application/json"}}, Body: test.body,
+				Finalize: func(_ gateway.Usage, _, code string) { finalCode = code },
+			}
+			router := gin.New()
+			router.GET("/", func(c *gin.Context) { handler.writeResult(c, result, false, streamProtocolResponses) })
+			recorder := httptest.NewRecorder()
+			router.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/", nil))
+			if recorder.Code != test.wantStatus || finalCode != test.wantCode || !strings.Contains(recorder.Body.String(), `"`+test.wantCode+`"`) {
+				t.Fatalf("status=%d body=%s finalize=%q", recorder.Code, recorder.Body.String(), finalCode)
+			}
+		})
+	}
+}
+
+func TestMediaResultRejectsActiveContentAndRedirects(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	handler := NewHandler(nil, nil, 1<<20)
+	for _, tc := range []struct {
+		name        string
+		status      int
+		contentType string
+		headers     http.Header
+	}{
+		{name: "html", status: http.StatusOK, contentType: "text/html; charset=utf-8"},
+		{name: "svg", status: http.StatusOK, contentType: "image/svg+xml"},
+		{name: "redirect", status: http.StatusFound, contentType: "text/plain", headers: http.Header{"Location": {"javascript:alert(1)"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			finalCode := ""
+			header := make(http.Header)
+			for name, values := range tc.headers {
+				header[name] = append([]string(nil), values...)
+			}
+			header.Set("Content-Type", tc.contentType)
+			result := &gateway.Result{
+				StatusCode: tc.status,
+				Header:     header,
+				Body:       io.NopCloser(strings.NewReader(`<script id="must-not-reflect">alert(1)</script>`)),
+				Finalize: func(_ gateway.Usage, _, code string) {
+					finalCode = code
+				},
+			}
+			router := gin.New()
+			router.GET("/", func(c *gin.Context) { handler.writeMediaResult(c, result) })
+			recorder := httptest.NewRecorder()
+			router.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/", nil))
+			if recorder.Code != http.StatusBadGateway || strings.Contains(recorder.Body.String(), "must-not-reflect") || recorder.Header().Get("Location") != "" || finalCode == "" {
+				t.Fatalf("status=%d headers=%#v body=%s finalize=%q", recorder.Code, recorder.Header(), recorder.Body.String(), finalCode)
+			}
+		})
+	}
+}
+
+func TestMediaResultPinsSafeResponseHeaders(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	handler := NewHandler(nil, nil, 1<<20)
+	result := &gateway.Result{
+		StatusCode: http.StatusOK,
+		Header: http.Header{
+			"Content-Type":   {"audio/mpeg; attacker=ignored"},
+			"Content-Length": {"5"},
+			"Set-Cookie":     {"upstream=secret"},
+			"Location":       {"javascript:alert(1)"},
+			"X-Request-Id":   {"upstream-request"},
+		},
+		Body:     io.NopCloser(strings.NewReader("audio")),
+		Finalize: func(gateway.Usage, string, string) {},
+	}
+	router := gin.New()
+	router.GET("/", func(c *gin.Context) { handler.writeMediaResult(c, result) })
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/", nil))
+	if recorder.Code != http.StatusOK || recorder.Body.String() != "audio" {
+		t.Fatalf("status=%d body=%q", recorder.Code, recorder.Body.String())
+	}
+	if recorder.Header().Get("Content-Type") != "audio/mpeg" || recorder.Header().Get("X-Content-Type-Options") != "nosniff" || recorder.Header().Get("Content-Security-Policy") == "" {
+		t.Fatalf("safe headers = %#v", recorder.Header())
+	}
+	if recorder.Header().Get("Set-Cookie") != "" || recorder.Header().Get("Location") != "" || recorder.Header().Get("X-Request-Id") != "upstream-request" {
+		t.Fatalf("unsafe or missing forwarded headers = %#v", recorder.Header())
+	}
+}
+
+func TestVideoContentRejectsUnsafeContentType(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	context, _ := gin.CreateTestContext(recorder)
+	writeVideoContent(context, strings.NewReader(`<script id="must-not-reflect">alert(1)</script>`), "text/html", -1, "video_request_1")
+	if recorder.Code != http.StatusBadGateway || strings.Contains(recorder.Body.String(), "must-not-reflect") {
+		t.Fatalf("status=%d headers=%#v body=%s", recorder.Code, recorder.Header(), recorder.Body.String())
+	}
+}
+
 func TestMessagesEndpointUsesAnthropicContract(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
@@ -428,6 +623,11 @@ func TestVideoGenerationResponseMatchesOfficialPollingShape(t *testing.T) {
 	if done["status"] != "done" || done["progress"] != 100 || !ok || video["url"] != "https://assets.grok.com/video.mp4" || video["duration"] != 8 || video["respect_moderation"] != true {
 		t.Fatalf("done response=%#v", done)
 	}
+	extended := videoGenerationResponse(mediadomain.Job{Operation: mediadomain.VideoOperationExtend, Status: mediadomain.StatusCompleted, Seconds: 6, UpstreamURL: "https://assets.grok.com/extended.mp4"})
+	extendedVideo, ok := extended["video"].(gin.H)
+	if !ok || extendedVideo["duration"] != nil {
+		t.Fatalf("extended response exposes requested extension as output duration: %#v", extended)
+	}
 	failed := videoGenerationResponse(mediadomain.Job{Status: mediadomain.StatusFailed, ErrorCode: "account_unavailable", ErrorMessage: "try later"})
 	errorValue, ok := failed["error"].(gin.H)
 	if failed["status"] != "failed" || !ok || errorValue["code"] != "service_unavailable" || failed["model"] != nil || failed["progress"] != nil {
@@ -447,6 +647,7 @@ func TestImageGenerationEndpointValidatesXAIContractBeforeRouting(t *testing.T) 
 	}{
 		{name: "zero n", body: `{"model":"grok-imagine-image","prompt":"test","n":0}`, want: "n 必须在 1 到 10 之间"},
 		{name: "large n", body: `{"model":"grok-imagine-image","prompt":"test","n":11}`, want: "n 必须在 1 到 10 之间"},
+		{name: "invalid quality", body: `{"model":"grok-imagine-image-2.0","prompt":"test","quality":"high"}`, want: "quality 必须是 low 或 medium"},
 		{name: "storage options", body: `{"model":"grok-imagine-image","prompt":"test","storage_options":{"filename":"test.jpg"}}`, want: "不支持 storage_options"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -503,6 +704,17 @@ func TestImageEditAcceptsOfficialJSONShape(t *testing.T) {
 	router.ServeHTTP(invalidResolutionRecorder, invalidResolution)
 	if invalidResolutionRecorder.Code != http.StatusBadRequest || !strings.Contains(invalidResolutionRecorder.Body.String(), "resolution 必须是 1k 或 2k") {
 		t.Fatalf("invalid resolution status=%d body=%s", invalidResolutionRecorder.Code, invalidResolutionRecorder.Body.String())
+	}
+
+	invalidQuality := httptest.NewRequest(http.MethodPost, "/v1/images/edits", strings.NewReader(`{
+		"model":"grok-imagine-image-2.0","prompt":"test","quality":"high",
+		"image":{"url":"https://example.com/input.png"}
+	}`))
+	invalidQuality.Header.Set("Content-Type", "application/json")
+	invalidQualityRecorder := httptest.NewRecorder()
+	router.ServeHTTP(invalidQualityRecorder, invalidQuality)
+	if invalidQualityRecorder.Code != http.StatusBadRequest || !strings.Contains(invalidQualityRecorder.Body.String(), "quality 必须是 low 或 medium") {
+		t.Fatalf("invalid quality status=%d body=%s", invalidQualityRecorder.Code, invalidQualityRecorder.Body.String())
 	}
 
 	validBatchCount := httptest.NewRequest(http.MethodPost, "/v1/images/edits", strings.NewReader(`{
@@ -680,14 +892,29 @@ func TestStreamInspectorMarksFirstGeneratedTokenOnce(t *testing.T) {
 			delta:   `data: {"type":"response.custom_tool_call_input.delta","output_index":1,"item_id":"ctc_1","delta":"{}"}` + "\n\n",
 		},
 		{
+			name: "responses encrypted reasoning item", protocol: streamProtocolResponses,
+			prelude: `data: {"type":"response.created","response":{"id":"resp_1"}}` + "\n\n",
+			delta:   `data: {"type":"response.output_item.added","item":{"id":"rs_1","type":"reasoning","status":"in_progress"}}` + "\n\n",
+		},
+		{
 			name: "chat reasoning", protocol: streamProtocolChat,
 			prelude: `data: {"choices":[{"delta":{"role":"assistant"}}]}` + "\n\n",
 			delta:   `data: {"choices":[{"delta":{"reasoning_content":"thinking"}}]}` + "\n\n",
 		},
 		{
+			name: "chat thinking_content", protocol: streamProtocolChat,
+			prelude: `data: {"choices":[{"delta":{"role":"assistant"}}]}` + "\n\n",
+			delta:   `data: {"choices":[{"delta":{"thinking_content":"thinking"}}]}` + "\n\n",
+		},
+		{
 			name: "anthropic tool input", protocol: streamProtocolAnthropic,
 			prelude: `data: {"type":"message_start","message":{"id":"msg_1"}}` + "\n\n",
 			delta:   `data: {"type":"content_block_delta","delta":{"type":"input_json_delta","partial_json":"{\"q\":"}}` + "\n\n",
+		},
+		{
+			name: "anthropic thinking start", protocol: streamProtocolAnthropic,
+			prelude: `data: {"type":"message_start","message":{"id":"msg_1"}}` + "\n\n",
+			delta:   `data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}` + "\n\n",
 		},
 	}
 	for _, test := range tests {
@@ -719,6 +946,434 @@ func TestStreamInspectorDoesNotMarkImageEvents(t *testing.T) {
 	inspector.markFirstTokenForwarded()
 	if marked != 0 {
 		t.Fatalf("image stream marked first token %d times", marked)
+	}
+}
+
+func TestStreamInspectorMarksChatReasoningComment(t *testing.T) {
+	marked := 0
+	inspector := &responseInspector{protocol: streamProtocolChat, onFirstToken: func() { marked++ }}
+	inspector.Inspect([]byte(": grok2api-reasoning-start\n\n"))
+	if marked != 0 {
+		t.Fatalf("reasoning comment marked first token before forwarding %d times", marked)
+	}
+	inspector.markFirstTokenForwarded()
+	if marked != 1 {
+		t.Fatalf("reasoning comment marked first token %d times", marked)
+	}
+}
+
+func TestInternalSSEMarkerFilterAcrossChunkBoundaries(t *testing.T) {
+	markers := reasoningStartSSEComment + "\n\n" + reasoningEvidenceSSEComment + "\n\n"
+	input := []byte("data: before\n\n" + markers + "data: after\n\n")
+	want := "data: before\n\ndata: after\n\n"
+	for split := 0; split <= len(input); split++ {
+		filter := internalSSEMarkerFilter{enabled: true}
+		var output []byte
+		output = append(output, filter.Filter(input[:split], false)...)
+		output = append(output, filter.Filter(input[split:], false)...)
+		output = append(output, filter.Filter(nil, true)...)
+		if string(output) != want {
+			t.Fatalf("split %d output = %q, want %q", split, output, want)
+		}
+	}
+}
+
+func TestCopyStreamConsumesInternalReasoningMarker(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	context, _ := gin.CreateTestContext(recorder)
+	body := `data: {"choices":[{"delta":{"role":"assistant"}}]}` + "\n\n" +
+		": grok2api-reasoning-start\n\n" +
+		": grok2api-reasoning-evidence\n\n" +
+		`data: {"choices":[{"delta":{"content":"hello"}}]}` + "\n\n" +
+		"data: [DONE]\n\n"
+	marked := 0
+	if _, err := copyStream(context.Writer, strings.NewReader(body), streamProtocolChat, func() { marked++ }); err != nil {
+		t.Fatal(err)
+	}
+	if marked != 1 {
+		t.Fatalf("first token marked %d times", marked)
+	}
+	if strings.Contains(recorder.Body.String(), "grok2api-reasoning-") {
+		t.Fatalf("internal marker leaked to client: %q", recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), `"content":"hello"`) {
+		t.Fatalf("visible Chat delta missing: %q", recorder.Body.String())
+	}
+}
+
+func TestCopyStreamConsumesAnthropicReasoningEvidenceMarker(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	context, _ := gin.CreateTestContext(recorder)
+	body := ": grok2api-reasoning-evidence\n\n" +
+		"event: content_block_delta\n" +
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig"}}` + "\n\n" +
+		"event: message_stop\n" +
+		`data: {"type":"message_stop"}` + "\n\n"
+	if _, err := copyStream(context.Writer, strings.NewReader(body), streamProtocolAnthropic, nil); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(recorder.Body.String(), "grok2api-reasoning-evidence") {
+		t.Fatalf("internal Anthropic marker leaked to client: %q", recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), `"signature":"sig"`) {
+		t.Fatalf("Anthropic signature delta missing: %q", recorder.Body.String())
+	}
+}
+
+func TestCopyStreamPreservesBufferedTailOnReadError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	context, _ := gin.CreateTestContext(recorder)
+	body := []byte(`data: {"choices":[{"delta":{"content":"partial"}}]}` + "\n\n:")
+	_, err := copyStream(context.Writer, &chunkErrorReader{data: body}, streamProtocolChat, nil)
+	if !errors.Is(err, errUpstreamStreamRead) {
+		t.Fatalf("copy error = %v", err)
+	}
+	got := recorder.Body.Bytes()
+	if !bytes.HasPrefix(got, body) {
+		t.Fatalf("interrupted body prefix = %q, want %q", got, body)
+	}
+	if !bytes.Contains(got, []byte(`"code":"upstream_stream_interrupted"`)) || !bytes.Contains(got, []byte("data: [DONE]")) {
+		t.Fatalf("interrupted body missing terminal SSE: %q", got)
+	}
+}
+
+func TestClassifyCopyErrorDistinguishesClientFromUpstream(t *testing.T) {
+	readErr := fmt.Errorf("%w: cut", errUpstreamStreamRead)
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if got := classifyCopyError(canceled, readErr); got != "client_stream_interrupted" {
+		t.Fatalf("client abort = %q", got)
+	}
+	if got := classifyCopyError(context.Background(), readErr); got != "upstream_stream_interrupted" {
+		t.Fatalf("upstream abort = %q", got)
+	}
+	idle, stop := context.WithCancelCause(context.Background())
+	stop(neterror.ErrUpstreamStreamIdleTimeout)
+	idleErr := fmt.Errorf("%w: %w", errUpstreamStreamRead, neterror.ErrUpstreamStreamIdleTimeout)
+	if got := classifyCopyError(idle, idleErr); got != "upstream_stream_idle_timeout" {
+		t.Fatalf("idle timeout = %q", got)
+	}
+	loopErr := fmt.Errorf("%w: %w", errUpstreamStreamRead, neterror.ErrUpstreamOutputLoop)
+	if got := classifyCopyError(context.Background(), loopErr); got != "upstream_output_loop" {
+		t.Fatalf("output loop = %q", got)
+	}
+}
+
+func TestCopyStreamWritesTerminalOnIdleTimeout(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	tests := []struct {
+		name     string
+		protocol streamProtocol
+		want     []string
+	}{
+		{name: "chat", protocol: streamProtocolChat, want: []string{`"code":"upstream_stream_idle_timeout"`, "data: [DONE]"}},
+		{name: "responses", protocol: streamProtocolResponses, want: []string{`"type":"response.failed"`, `"id":"resp_abort"`, `"created_at":`, `"sequence_number":`, `"code":"server_error"`, `"message":"upstream_stream_idle_timeout:`, `"status":"failed"`, `"model":"grok-test"`}},
+		{name: "anthropic", protocol: streamProtocolAnthropic, want: []string{`"type":"error"`, "上游流式响应长时间无数据"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			context, _ := gin.CreateTestContext(recorder)
+			_, err := copyStreamWithFallbackModel(context.Writer, &idleErrorReader{}, test.protocol, nil, "grok-test")
+			if !errors.Is(err, errUpstreamStreamRead) || !errors.Is(err, neterror.ErrUpstreamStreamIdleTimeout) {
+				t.Fatalf("copy error = %v", err)
+			}
+			got := recorder.Body.String()
+			for _, fragment := range test.want {
+				if !strings.Contains(got, fragment) {
+					t.Fatalf("body %q missing %q", got, fragment)
+				}
+			}
+		})
+	}
+}
+
+func TestCopyStreamWritesTerminalOnOutputLoop(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	tests := []struct {
+		name     string
+		protocol streamProtocol
+		want     []string
+	}{
+		{name: "chat", protocol: streamProtocolChat, want: []string{`"code":"upstream_output_loop"`, "data: [DONE]"}},
+		{name: "responses", protocol: streamProtocolResponses, want: []string{`"type":"response.failed"`, `"code":"server_error"`, `"message":"upstream_output_loop:`, `"status":"failed"`}},
+		{name: "anthropic", protocol: streamProtocolAnthropic, want: []string{`"type":"error"`, `"message":"upstream_output_loop: 上游输出陷入循环"`}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			context, _ := gin.CreateTestContext(recorder)
+			_, err := copyStreamWithFallbackModel(context.Writer, &outputLoopErrorReader{}, test.protocol, nil, "grok-test")
+			if !errors.Is(err, errUpstreamStreamRead) || !errors.Is(err, neterror.ErrUpstreamOutputLoop) {
+				t.Fatalf("copy error = %v", err)
+			}
+			got := recorder.Body.String()
+			for _, fragment := range test.want {
+				if !strings.Contains(got, fragment) {
+					t.Fatalf("body %q missing %q", got, fragment)
+				}
+			}
+		})
+	}
+}
+
+func TestCopyStreamFlushesUnterminatedResponsesTail(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	context, _ := gin.CreateTestContext(recorder)
+	body := "event: response.completed\n" + `data: {"type":"response.completed","response":{"id":"resp_tail","status":"completed","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`
+	metadata, err := copyStream(context.Writer, strings.NewReader(body), streamProtocolResponses, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := recorder.Body.String()
+	if !strings.Contains(got, `"type":"response.completed"`) || !strings.HasSuffix(got, "\n\n") {
+		t.Fatalf("unterminated Responses tail was not flushed as an SSE event: %q", got)
+	}
+	if metadata.ResponseID != "resp_tail" || metadata.Usage.TotalTokens != 2 {
+		t.Fatalf("metadata = %#v", metadata)
+	}
+}
+
+func TestCopyStreamFlushesUnterminatedResponsesTailBeforeAbort(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	context, _ := gin.CreateTestContext(recorder)
+	body := []byte(`data: {"type":"response.output_text.delta","delta":"partial"}`)
+	marked := 0
+	metadata, err := copyStream(context.Writer, &chunkErrorReader{data: body}, streamProtocolResponses, func() {
+		marked++
+		if !strings.Contains(recorder.Body.String(), `"delta":"partial"`) {
+			t.Fatalf("first token marked before the unterminated tail was flushed: %q", recorder.Body.String())
+		}
+	})
+	if !errors.Is(err, errUpstreamStreamRead) {
+		t.Fatalf("copy error = %v", err)
+	}
+	got := recorder.Body.String()
+	if !strings.Contains(got, `"delta":"partial"`) || !strings.Contains(got, "\n\nevent: response.failed") {
+		t.Fatalf("unterminated tail and abort event were not separated: %q", got)
+	}
+	if marked != 1 {
+		t.Fatalf("first token marked %d times", marked)
+	}
+	if !metadata.Usage.OutputObserved {
+		t.Fatal("forwarded unterminated delta was not recorded as observed output")
+	}
+}
+
+func TestCopyStreamDropsMalformedResponsesTailBeforeAbort(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	context, _ := gin.CreateTestContext(recorder)
+	malformed := []byte(`data: {"type":"response.output_text.delta","delta":"partial`)
+	_, err := copyStream(context.Writer, &chunkErrorReader{data: malformed}, streamProtocolResponses, nil)
+	if !errors.Is(err, errUpstreamStreamRead) {
+		t.Fatalf("copy error = %v", err)
+	}
+	got := recorder.Body.String()
+	if strings.Contains(got, string(malformed)) {
+		t.Fatalf("malformed tail leaked before terminal event: %q", got)
+	}
+	if !strings.Contains(got, `"type":"response.failed"`) {
+		t.Fatalf("abort event missing after malformed tail: %q", got)
+	}
+}
+
+func TestCopyStreamDoesNotAppendAbortAfterUpstreamFailureTerminal(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	context, _ := gin.CreateTestContext(recorder)
+	body := []byte(`data: {"type":"response.failed","response":{"id":"resp_failed","status":"failed","error":{"message":"failed"}}}` + "\n\n")
+	_, err := copyStream(context.Writer, &chunkErrorReader{data: body}, streamProtocolResponses, nil)
+	if !errors.Is(err, errUpstreamStreamFailed) {
+		t.Fatalf("copy error = %v", err)
+	}
+	got := recorder.Body.String()
+	if strings.Count(got, `"type":"response.failed"`) != 1 || strings.Contains(got, `"type":"response.incomplete"`) {
+		t.Fatalf("upstream terminal was followed by a second terminal event: %q", got)
+	}
+}
+
+func TestCopyStreamWritesTerminalOnIncompleteEOF(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	context, _ := gin.CreateTestContext(recorder)
+	_, err := copyStreamWithFallbackModel(context.Writer, strings.NewReader(""), streamProtocolResponses, nil, "grok-test")
+	if !errors.Is(err, errUpstreamStreamIncomplete) {
+		t.Fatalf("copy error = %v", err)
+	}
+	got := recorder.Body.String()
+	if !strings.Contains(got, `"type":"response.failed"`) || !strings.Contains(got, `"code":"server_error"`) || !strings.Contains(got, `"message":"upstream_stream_incomplete:`) || !strings.Contains(got, `"model":"grok-test"`) {
+		t.Fatalf("incomplete EOF missing terminal SSE event: %q", got)
+	}
+}
+
+func TestSanitizeResponsesFillsMissingIDs(t *testing.T) {
+	state := &responsesCompatState{model: "grok-test"}
+	got := rewriteResponsesDataLine([]byte(`data: {"type":"response.output_item.added","item":{"type":"reasoning"}}`+"\n"), state)
+	if !bytes.Contains(got, []byte(`"id":"item_1"`)) {
+		t.Fatalf("item id not filled: %s", got)
+	}
+	got = rewriteResponsesDataLine([]byte(`data: {"type":"response.created","response":{"status":"in_progress"}}`+"\n"), state)
+	if !bytes.Contains(got, []byte(`"id":"resp_abort"`)) || !bytes.Contains(got, []byte(`"created_at":`)) || !bytes.Contains(got, []byte(`"model":"grok-test"`)) {
+		t.Fatalf("response id/created_at/model not filled: %s", got)
+	}
+}
+
+func TestCopyStreamAbortTrailerAlwaysIncludesModel(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	context, _ := gin.CreateTestContext(recorder)
+	_, err := copyStreamWithFallbackModel(context.Writer, &idleErrorReader{}, streamProtocolResponses, nil, "grok-test")
+	if !errors.Is(err, errUpstreamStreamRead) {
+		t.Fatalf("copy error = %v", err)
+	}
+	got := recorder.Body.String()
+	if !strings.Contains(got, `"type":"response.failed"`) || !strings.Contains(got, `"model":"grok-test"`) {
+		t.Fatalf("abort trailer missing model: %q", got)
+	}
+}
+
+func TestCopyStreamAbortTrailerPrefersUpstreamModel(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	context, _ := gin.CreateTestContext(recorder)
+	body := []byte(`data: {"type":"response.created","response":{"id":"resp_real","model":"upstream-model","status":"in_progress"}}` + "\n\n")
+	_, err := copyStreamWithFallbackModel(context.Writer, &chunkErrorReader{data: body}, streamProtocolResponses, nil, "request-model")
+	if !errors.Is(err, errUpstreamStreamRead) {
+		t.Fatalf("copy error = %v", err)
+	}
+	got := recorder.Body.String()
+	failedAt := strings.LastIndex(got, "event: response.failed")
+	if failedAt < 0 {
+		t.Fatalf("abort trailer missing: %q", got)
+	}
+	failed := got[failedAt:]
+	if !strings.Contains(failed, `"model":"upstream-model"`) || strings.Contains(failed, `"model":"request-model"`) {
+		t.Fatalf("abort trailer did not prefer upstream model: %q", failed)
+	}
+}
+
+func TestResponsesAbortTrailerUsesStandardErrorShape(t *testing.T) {
+	trailer := streamAbortTrailer(
+		streamProtocolResponses,
+		neterror.ErrUpstreamStreamIdleTimeout,
+		responseMetadata{},
+		&responsesCompatState{model: "grok-test"},
+	)
+	dataAt := bytes.Index(trailer, []byte("data: "))
+	if dataAt < 0 {
+		t.Fatalf("abort trailer missing data line: %q", trailer)
+	}
+	payload := bytes.TrimSpace(trailer[dataAt+len("data: "):])
+	var event struct {
+		Response struct {
+			Error map[string]any `json:"error"`
+		} `json:"response"`
+	}
+	if err := json.Unmarshal(payload, &event); err != nil {
+		t.Fatalf("decode abort trailer: %v; payload=%q", err, payload)
+	}
+	if event.Response.Error["code"] != "server_error" || !strings.Contains(stringAny(event.Response.Error["message"]), "upstream_stream_idle_timeout") {
+		t.Fatalf("unexpected Responses error: %#v", event.Response.Error)
+	}
+	if _, exists := event.Response.Error["type"]; exists {
+		t.Fatalf("Responses error contains non-protocol type: %#v", event.Response.Error)
+	}
+}
+
+func TestSanitizeResponsesKeepsItemIDStableAcrossEvents(t *testing.T) {
+	state := &responsesCompatState{}
+	delta := rewriteResponsesDataLine([]byte(`data: {"type":"response.reasoning_text.delta","output_index":0,"delta":"plan"}`+"\n"), state)
+	added := rewriteResponsesDataLine([]byte(`data: {"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning"}}`+"\n"), state)
+	done := rewriteResponsesDataLine([]byte(`data: {"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning"}}`+"\n"), state)
+	for name, got := range map[string][]byte{"added": added, "done": done, "delta": delta} {
+		if !bytes.Contains(got, []byte(`"id":"item_1"`)) && !bytes.Contains(got, []byte(`"item_id":"item_1"`)) {
+			t.Fatalf("%s event did not reuse item_1: %s", name, got)
+		}
+	}
+}
+
+func TestSanitizeResponsesKeepsGeneratedResponseIDStable(t *testing.T) {
+	state := &responsesCompatState{}
+	created := rewriteResponsesDataLine([]byte(`data: {"type":"response.created","response":{"status":"in_progress"}}`+"\n"), state)
+	completed := rewriteResponsesDataLine([]byte(`data: {"type":"response.completed","id":"resp_late","response":{"id":"resp_late","status":"completed"}}`+"\n"), state)
+	for name, got := range map[string][]byte{"created": created, "completed": completed} {
+		if !bytes.Contains(got, []byte(`"id":"resp_abort"`)) || bytes.Contains(got, []byte("resp_late")) {
+			t.Fatalf("%s event changed response identity: %s", name, got)
+		}
+	}
+}
+
+func TestSanitizeResponsesUsesExistingEventIDForMissingResponseID(t *testing.T) {
+	state := &responsesCompatState{}
+	got := rewriteResponsesDataLine([]byte(`data: {"type":"response.created","id":"resp_real","response":{"status":"in_progress"}}`+"\n"), state)
+	if !bytes.Contains(got, []byte(`"id":"resp_real"`)) || bytes.Contains(got, []byte("resp_abort")) {
+		t.Fatalf("existing event id was not reused for response: %s", got)
+	}
+}
+
+func TestSanitizeResponsesKeepsResponseCreatedAtStable(t *testing.T) {
+	state := &responsesCompatState{}
+	created := rewriteResponsesDataLine([]byte(`data: {"type":"response.created","id":"resp_real","response":{"id":"resp_real","created_at":123,"status":"in_progress"}}`+"\n"), state)
+	completed := rewriteResponsesDataLine([]byte(`data: {"type":"response.completed","id":"resp_real","response":{"id":"resp_real","created_at":456,"status":"completed"}}`+"\n"), state)
+	for name, got := range map[string][]byte{"created": created, "completed": completed} {
+		if !bytes.Contains(got, []byte(`"created_at":123`)) || bytes.Contains(got, []byte(`"created_at":456`)) {
+			t.Fatalf("%s event changed response creation time: %s", name, got)
+		}
+	}
+}
+
+func TestSanitizeResponsesDoesNotAddResponseIDToErrorEvent(t *testing.T) {
+	state := &responsesCompatState{}
+	got := rewriteResponsesDataLine([]byte(`data: {"type":"error","code":"server_error","message":"failed"}`+"\n"), state)
+	if bytes.Contains(got, []byte(`"id":`)) {
+		t.Fatalf("Responses error event gained a non-protocol response id: %s", got)
+	}
+}
+
+func TestSanitizeResponsesFillsMissingOutputTextAnnotations(t *testing.T) {
+	state := &responsesCompatState{}
+	added := rewriteResponsesDataLine([]byte(`data: {"type":"response.output_item.added","item":{"type":"message","content":[{"type":"output_text","text":"hi"}]}}`+"\n"), state)
+	if !bytes.Contains(added, []byte(`"annotations":[]`)) {
+		t.Fatalf("item output_text missing annotations: %s", added)
+	}
+	completed := rewriteResponsesDataLine([]byte(`data: {"type":"response.completed","response":{"id":"resp_1","output":[{"type":"message","content":[{"type":"output_text","text":"hi"}]}]}}`+"\n"), state)
+	if !bytes.Contains(completed, []byte(`"annotations":[]`)) {
+		t.Fatalf("completed output_text missing annotations: %s", completed)
+	}
+	part := rewriteResponsesDataLine([]byte(`data: {"type":"response.content_part.added","part":{"type":"output_text","text":"hi"}}`+"\n"), state)
+	if !bytes.Contains(part, []byte(`"annotations":[]`)) {
+		t.Fatalf("content_part output_text missing annotations: %s", part)
+	}
+	kept := rewriteResponsesDataLine([]byte(`data: {"type":"response.output_item.done","item":{"type":"message","content":[{"type":"output_text","text":"hi","annotations":[{"type":"url_citation","url":"https://x.test"}]}]}}`+"\n"), state)
+	if !bytes.Contains(kept, []byte(`"url":"https://x.test"`)) || bytes.Contains(kept, []byte(`"annotations":[]`)) {
+		t.Fatalf("existing annotations were replaced: %s", kept)
+	}
+}
+
+func TestResponsesCompatBoundsUnterminatedLineBuffer(t *testing.T) {
+	state := &responsesCompatState{}
+	chunk := bytes.Repeat([]byte{'x'}, maxStreamEventInspectionBytes+1)
+	got := rewriteResponsesStreamChunk(chunk, state)
+	if len(got) != len(chunk) || len(state.pending) != 0 || !state.passingLongLine {
+		t.Fatalf("oversized line was retained: output=%d pending=%d passing=%t", len(got), len(state.pending), state.passingLongLine)
+	}
+	got = rewriteResponsesStreamChunk([]byte("tail\n"), state)
+	if string(got) != "tail\n" || state.passingLongLine {
+		t.Fatalf("oversized line passthrough did not finish: %q passing=%t", got, state.passingLongLine)
+	}
+}
+
+func TestResponseInspectorTreatsOversizedDataLineAsObservedOutput(t *testing.T) {
+	inspector := &responseInspector{protocol: streamProtocolResponses}
+	inspector.Inspect(append([]byte("data: "), bytes.Repeat([]byte{'x'}, maxStreamEventInspectionBytes)...))
+	if !inspector.Metadata().Usage.OutputObserved {
+		t.Fatal("forwarded oversized SSE data line was still classified as empty")
 	}
 }
 
@@ -780,6 +1435,21 @@ func TestAnthropicUsageReconstructsCacheCreationAndSaturates(t *testing.T) {
 	usage = normalizeMetadataUsage(overflow, streamProtocolAnthropic).Usage
 	if usage.InputTokens != math.MaxInt64 || usage.TotalTokens != math.MaxInt64 {
 		t.Fatalf("anthropic saturated usage = %#v", usage)
+	}
+}
+
+func TestExtractMetadataPreservesReportedZeroUsage(t *testing.T) {
+	metadata := extractMetadata([]byte(`{"id":"resp_zero","usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}`))
+	if !metadata.Usage.Reported {
+		t.Fatalf("zero usage object was treated as missing: %#v", metadata.Usage)
+	}
+	if metadata.Usage.InputTokens != 0 || metadata.Usage.OutputTokens != 0 || metadata.Usage.TotalTokens != 0 {
+		t.Fatalf("zero usage object changed values: %#v", metadata.Usage)
+	}
+
+	missing := extractMetadata([]byte(`{"id":"resp_missing"}`))
+	if missing.Usage.Reported {
+		t.Fatalf("missing usage object was treated as reported: %#v", missing.Usage)
 	}
 }
 
@@ -886,8 +1556,11 @@ func TestCopyStreamRequiresProtocolTerminalEvent(t *testing.T) {
 			} else if metadata.StreamFailure != nil {
 				t.Fatalf("unexpected stream failure diagnostic = %#v", metadata.StreamFailure)
 			}
-			if recorder.Body.String() != test.body {
+			if test.protocol != streamProtocolResponses && recorder.Body.String() != test.body {
 				t.Fatalf("forwarded = %q", recorder.Body.String())
+			}
+			if test.protocol == streamProtocolResponses && !strings.Contains(recorder.Body.String(), `"type":`) {
+				t.Fatalf("responses stream missing type: %q", recorder.Body.String())
 			}
 		})
 	}
@@ -917,11 +1590,171 @@ func TestWriteResultRecordsStreamFailureDiagnostic(t *testing.T) {
 	})
 	recorder := httptest.NewRecorder()
 	router.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/", nil))
-	if recorder.Code != http.StatusOK || recorder.Body.String() != stream || finalCode != "upstream_stream_error" {
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"type":"response.failed"`) || finalCode != "upstream_stream_error" {
 		t.Fatalf("status=%d body=%q final=%q", recorder.Code, recorder.Body.String(), finalCode)
 	}
 	if diagnostic == nil || !strings.Contains(string(diagnostic.Body), `"code":"server_error"`) {
 		t.Fatalf("diagnostic = %#v", diagnostic)
+	}
+}
+
+func TestWriteResultClientAbortKeepsUpstreamStatus(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	handler := NewHandler(nil, nil, 1<<20)
+	var finalCode string
+	result := &gateway.Result{
+		StatusCode: http.StatusOK,
+		Status:     "200 OK",
+		Header:     http.Header{"Content-Type": {"text/event-stream"}},
+		Body:       io.NopCloser(&chunkErrorReader{data: []byte("data: {\"type\":\"response.created\"}\n\n")}),
+		Finalize:   func(_ gateway.Usage, _, code string) { finalCode = code },
+	}
+	router := gin.New()
+	router.POST("/", func(c *gin.Context) {
+		handler.writeResult(c, result, true, streamProtocolResponses)
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/", nil).WithContext(ctx))
+	if recorder.Code != http.StatusOK || finalCode != "client_stream_interrupted" {
+		t.Fatalf("status=%d finalize=%q body=%q", recorder.Code, finalCode, recorder.Body.String())
+	}
+}
+
+func TestWriteResultUpstreamCutStaysUpstreamInterrupted(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	handler := NewHandler(nil, nil, 1<<20)
+	var finalCode string
+	result := &gateway.Result{
+		StatusCode: http.StatusOK,
+		Status:     "200 OK",
+		Header:     http.Header{"Content-Type": {"text/event-stream"}},
+		Body:       io.NopCloser(&chunkErrorReader{data: []byte("data: {\"type\":\"response.created\"}\n\n")}),
+		Finalize:   func(_ gateway.Usage, _, code string) { finalCode = code },
+	}
+	router := gin.New()
+	router.POST("/", func(c *gin.Context) {
+		handler.writeResult(c, result, true, streamProtocolResponses)
+	})
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/", nil))
+	if recorder.Code != http.StatusOK || finalCode != "upstream_stream_interrupted" {
+		t.Fatalf("status=%d finalize=%q body=%q", recorder.Code, finalCode, recorder.Body.String())
+	}
+}
+
+func TestWriteProtocolResultMapsJSONInvalidArgumentWithoutCopyStream(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	handler := NewHandler(nil, nil, 1<<20)
+	body := `{"code":"invalid-argument","error":"mcp__codex_app__automation_update: tool parameter root must be an object type (root schema is an anyOf/oneOf union with a non-object branch)"}`
+	var finalCode string
+	recorded := false
+	result := &gateway.Result{
+		StatusCode: http.StatusBadRequest,
+		Status:     "400 Bad Request",
+		Header:     http.Header{"Content-Type": {"application/json"}, "Content-Length": {fmt.Sprintf("%d", len(body))}},
+		Body:       io.NopCloser(strings.NewReader(body)),
+		RecordStreamFailure: func(gateway.StreamFailureDiagnostic) {
+			recorded = true
+		},
+		Finalize: func(_ gateway.Usage, _, code string) {
+			finalCode = code
+		},
+	}
+	router := gin.New()
+	router.GET("/", func(c *gin.Context) {
+		handler.writeResponsesResult(c, result, true, "")
+	})
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/", nil))
+	if recorder.Code != http.StatusBadRequest || recorded || finalCode != "invalid_argument" {
+		t.Fatalf("status=%d recorded=%v final=%q body=%s", recorder.Code, recorded, finalCode, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), "mcp__codex_app__automation_update") || strings.Contains(recorder.Body.String(), "upstream_stream_incomplete") {
+		t.Fatalf("body=%s", recorder.Body.String())
+	}
+}
+
+func TestWriteProtocolResultAnthropicJSONReadFailureKeepsAnthropicShape(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	handler := NewHandler(nil, nil, 1<<20)
+	var finalCode string
+	result := &gateway.Result{
+		StatusCode: http.StatusBadRequest,
+		Status:     "400 Bad Request",
+		Header:     http.Header{"Content-Type": {"application/json"}},
+		Body:       io.NopCloser(&chunkErrorReader{data: []byte(`{"error":"partial"}`)}),
+		Finalize: func(_ gateway.Usage, _, code string) {
+			finalCode = code
+		},
+	}
+	router := gin.New()
+	router.GET("/", func(c *gin.Context) {
+		handler.writeAnthropicResult(c, result, true)
+	})
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/", nil))
+
+	var payload struct {
+		Type  string `json:"type"`
+		Error struct {
+			Type string `json:"type"`
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if recorder.Code != http.StatusBadGateway || payload.Type != "error" || payload.Error.Type != "api_error" || payload.Error.Code != "upstream_error" || finalCode != "upstream_error" {
+		t.Fatalf("status=%d payload=%#v final=%q body=%s", recorder.Code, payload, finalCode, recorder.Body.String())
+	}
+}
+
+func TestWriteProtocolResultDoesNotRemapOtherJSON4xxAsServerError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	handler := NewHandler(nil, nil, 1<<20)
+	body := `{"error":{"code":"not_found","message":"requested response is missing"}}`
+	var finalCode string
+	result := &gateway.Result{
+		StatusCode: http.StatusNotFound,
+		Status:     "404 Not Found",
+		Header:     http.Header{"Content-Type": {"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(body)),
+		Finalize: func(_ gateway.Usage, _, code string) {
+			finalCode = code
+		},
+	}
+	router := gin.New()
+	router.GET("/", func(c *gin.Context) {
+		handler.writeResponsesResult(c, result, true, "")
+	})
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/", nil))
+	if recorder.Code != http.StatusNotFound || finalCode != "upstream_error" || !strings.Contains(recorder.Body.String(), "requested response is missing") {
+		t.Fatalf("status=%d final=%q body=%s", recorder.Code, finalCode, recorder.Body.String())
+	}
+}
+
+func TestWriteResultOutputLoopFinalizesDistinctCode(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	handler := NewHandler(nil, nil, 1<<20)
+	var finalCode string
+	result := &gateway.Result{
+		StatusCode: http.StatusOK,
+		Status:     "200 OK",
+		Header:     http.Header{"Content-Type": {"text/event-stream"}},
+		Body:       io.NopCloser(&outputLoopErrorReader{}),
+		Finalize:   func(_ gateway.Usage, _, code string) { finalCode = code },
+	}
+	router := gin.New()
+	router.POST("/", func(c *gin.Context) {
+		handler.writeResult(c, result, true, streamProtocolResponses)
+	})
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/", nil))
+	if recorder.Code != http.StatusOK || finalCode != "upstream_output_loop" || !strings.Contains(recorder.Body.String(), `"message":"upstream_output_loop:`) {
+		t.Fatalf("status=%d finalize=%q body=%q", recorder.Code, finalCode, recorder.Body.String())
 	}
 }
 
@@ -982,24 +1815,29 @@ func TestCopyJSONForwardsBodyBeyondMetadataInspectionLimit(t *testing.T) {
 
 func TestCopyMediaRejectsUnknownLengthOverflowWithoutWritingPastLimit(t *testing.T) {
 	payload := bytes.Repeat([]byte("v"), 33)
-	var destination bytes.Buffer
-	err := copyMedia(&destination, bytes.NewReader(payload), 32)
+	recorder := httptest.NewRecorder()
+	context, _ := gin.CreateTestContext(recorder)
+	err := writeMediaBody(context, bytes.NewReader(payload), "video/mp4", http.StatusOK, 32)
 	if !errors.Is(err, errResponseTransferLimit) {
 		t.Fatalf("copy error = %v", err)
 	}
-	if destination.Len() != 32 {
-		t.Fatalf("forwarded media size = %d", destination.Len())
+	if recorder.Body.Len() != 32 {
+		t.Fatalf("forwarded media size = %d", recorder.Body.Len())
 	}
 }
 
 func TestCopyMediaAllowsExactLimit(t *testing.T) {
 	payload := bytes.Repeat([]byte("v"), 32)
-	var destination bytes.Buffer
-	if err := copyMedia(&destination, bytes.NewReader(payload), 32); err != nil {
+	recorder := httptest.NewRecorder()
+	context, _ := gin.CreateTestContext(recorder)
+	if err := writeMediaBody(context, bytes.NewReader(payload), "video/mp4", http.StatusOK, 32); err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(destination.Bytes(), payload) {
-		t.Fatalf("forwarded media = %q", destination.Bytes())
+	if !bytes.Equal(recorder.Body.Bytes(), payload) {
+		t.Fatalf("forwarded media = %q", recorder.Body.Bytes())
+	}
+	if recorder.Header().Get("Content-Type") != "video/mp4" {
+		t.Fatalf("content type = %q", recorder.Header().Get("Content-Type"))
 	}
 }
 
@@ -1015,6 +1853,7 @@ func TestSelectionErrorResponseDistinguishesCoolingAndSaturation(t *testing.T) {
 		{name: "cooling", failure: &gateway.SelectionUnavailableError{Reason: gateway.SelectionCooling, RetryAfter: 1500 * time.Millisecond}, status: http.StatusTooManyRequests, code: "upstream_cooling", retryAfter: "2"},
 		{name: "model cooling", failure: &gateway.SelectionUnavailableError{Reason: gateway.SelectionModelCooling, RetryAfter: time.Second}, status: http.StatusTooManyRequests, code: "upstream_model_cooling", retryAfter: "1"},
 		{name: "saturated", failure: &gateway.SelectionUnavailableError{Reason: gateway.SelectionSaturated, RetryAfter: time.Second}, status: http.StatusServiceUnavailable, code: "upstream_saturated", retryAfter: "1"},
+		{name: "pinned unavailable", failure: &gateway.SelectionUnavailableError{Reason: gateway.SelectionPinnedUnavailable, AccountID: 9}, status: http.StatusServiceUnavailable, code: "upstream_pinned_account_unavailable"},
 		{name: "scoped account range", failure: &gateway.SelectionUnavailableError{Reason: gateway.SelectionNoAccounts, Scope: clientkeydomain.AccountScope{Providers: clientkeydomain.ProviderScopeBuild, Tiers: clientkeydomain.TierScopeFree}}, status: http.StatusServiceUnavailable, code: "client_key_account_scope_unavailable"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -1025,5 +1864,93 @@ func TestSelectionErrorResponseDistinguishesCoolingAndSaturation(t *testing.T) {
 				t.Fatalf("status=%d code=%q retry-after=%q", status, code, recorder.Header().Get("Retry-After"))
 			}
 		})
+	}
+}
+
+func TestReferenceToVideoRequestValidation(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	handler := &Handler{maxBodyBytes: 1 << 20}
+	router := gin.New()
+	handler.Register(router.Group("/v1"))
+
+	combined := httptest.NewRequest(http.MethodPost, "/v1/videos/generations", strings.NewReader(`{
+		"model":"grok-imagine-video","prompt":"x",
+		"image":{"url":"https://example.com/a.png"},
+		"reference_images":[{"url":"https://example.com/b.png"}]
+	}`))
+	combined.Header.Set("Content-Type", "application/json")
+	combinedRec := httptest.NewRecorder()
+	router.ServeHTTP(combinedRec, combined)
+	if combinedRec.Code != http.StatusBadRequest || !strings.Contains(combinedRec.Body.String(), "不能与") {
+		t.Fatalf("combined image+refs status=%d body=%s", combinedRec.Code, combinedRec.Body.String())
+	}
+
+	highRes := httptest.NewRequest(http.MethodPost, "/v1/videos/generations", strings.NewReader(`{
+		"model":"grok-imagine-video","prompt":"x","resolution":"1080p",
+		"reference_images":[{"url":"https://example.com/b.png"}]
+	}`))
+	highRes.Header.Set("Content-Type", "application/json")
+	highResRec := httptest.NewRecorder()
+	router.ServeHTTP(highResRec, highRes)
+	if highResRec.Code != http.StatusBadRequest || !strings.Contains(highResRec.Body.String(), "720p") {
+		t.Fatalf("r2v 1080p status=%d body=%s", highResRec.Code, highResRec.Body.String())
+	}
+
+	tooManyAudio := httptest.NewRequest(http.MethodPost, "/v1/videos/generations", strings.NewReader(`{
+		"model":"grok-imagine-video","prompt":"x","duration":8,"resolution":"720p",
+		"reference_audios":[{"voice_id":"eve"},{"voice_id":"ara"},{"voice_id":"rex"},{"voice_id":"sal"}]
+	}`))
+	tooManyAudio.Header.Set("Content-Type", "application/json")
+	tooManyAudioRec := httptest.NewRecorder()
+	router.ServeHTTP(tooManyAudioRec, tooManyAudio)
+	if tooManyAudioRec.Code != http.StatusBadRequest || !strings.Contains(tooManyAudioRec.Body.String(), "最多 3") {
+		t.Fatalf("too many audios status=%d body=%s", tooManyAudioRec.Code, tooManyAudioRec.Body.String())
+	}
+
+	valid := httptest.NewRequest(http.MethodPost, "/v1/videos/generations", strings.NewReader(`{
+		"model":"grok-imagine-video","prompt":"The person speaks","duration":8,
+		"aspect_ratio":"9:16","resolution":"720p",
+		"reference_images":[{"url":"https://example.com/p.png"}],
+		"reference_audios":[{"voice_id":"eve"}]
+	}`))
+	valid.Header.Set("Content-Type", "application/json")
+	validRec := httptest.NewRecorder()
+	router.ServeHTTP(validRec, valid)
+	if validRec.Code != http.StatusUnauthorized {
+		t.Fatalf("valid r2v status=%d body=%s", validRec.Code, validRec.Body.String())
+	}
+}
+func TestEditAndExtendVideoRequestValidation(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	handler := &Handler{maxBodyBytes: 1 << 20}
+	router := gin.New()
+	group := router.Group("/v1")
+	handler.Register(group)
+
+	// Model compatibility is resolved from the selected upstream route, not the
+	// caller-controlled public model name.
+	rec := httptest.NewRecorder()
+	context, _ := gin.CreateTestContext(rec)
+	writeGatewayError(context, gateway.ErrVideoOperationUnsupported)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("unsupported video route status = %d body = %s", rec.Code, rec.Body.String())
+	}
+
+	// missing video on extend
+	req := httptest.NewRequest(http.MethodPost, "/v1/videos/extensions", strings.NewReader(`{"model":"grok-imagine-video","prompt":"x","duration":4}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("extend missing video status = %d body = %s", rec.Code, rec.Body.String())
+	}
+
+	// invalid extend duration
+	req = httptest.NewRequest(http.MethodPost, "/v1/videos/extensions", strings.NewReader(`{"model":"grok-imagine-video","prompt":"x","duration":15,"video":{"url":"https://example.com/a.mp4"}}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("extend bad duration status = %d body = %s", rec.Code, rec.Body.String())
 	}
 }

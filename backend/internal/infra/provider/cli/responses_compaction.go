@@ -61,30 +61,37 @@ func (c *gatewayCompactionCodec) encode(session, summary string) (string, error)
 	return gatewayCompactionPrefix + encrypted, nil
 }
 
-func (c *gatewayCompactionCodec) decode(session, blob string) (string, bool, error) {
+func (c *gatewayCompactionCodec) decode(session, blob string) (summary string, owned bool, sessionDrifted bool, err error) {
 	if !strings.HasPrefix(blob, gatewayCompactionPrefix) {
-		return "", false, nil
+		return "", false, false, nil
 	}
 	if c == nil || c.cipher == nil {
-		return "", true, fmt.Errorf("compaction codec unavailable")
+		return "", true, false, fmt.Errorf("compaction codec unavailable")
 	}
 	plain, err := c.cipher.Decrypt(strings.TrimPrefix(blob, gatewayCompactionPrefix))
 	if err != nil {
-		return "", true, fmt.Errorf("decode gateway compaction blob: %w", err)
+		return "", true, false, fmt.Errorf("decode gateway compaction blob: %w", err)
 	}
 	var envelope gatewayCompactionEnvelope
 	if err := json.Unmarshal([]byte(plain), &envelope); err != nil {
-		return "", true, fmt.Errorf("decode gateway compaction payload: %w", err)
+		return "", true, false, fmt.Errorf("decode gateway compaction payload: %w", err)
 	}
-	if envelope.Version != gatewayCompactionVersion || envelope.Session != session || envelope.Summary == "" || len(envelope.Summary) > maxGatewayCompactionSummary {
-		return "", true, fmt.Errorf("gateway compaction payload does not match this session")
+	if envelope.Version != gatewayCompactionVersion || envelope.Summary == "" || len(envelope.Summary) > maxGatewayCompactionSummary {
+		return "", true, false, fmt.Errorf("gateway compaction payload is invalid")
 	}
-	return envelope.Summary, true, nil
+	// Session / PromptCacheKey is advisory. A still-decryptable summary from
+	// this gateway instance is kept when the client key drifts after a model
+	// switch, degrade, or TUI session change. Foreign provider blobs stay
+	// rejected because they never carry this prefix or this cipher.
+	return envelope.Summary, true, envelope.Session != session, nil
 }
 
 // expandGatewayCompactionHistory restores gateway-owned remote-v2 state to a
-// portable developer message. Foreign OpenAI/Claude/Gemini blobs are never
-// forwarded to Grok Build: its decoder cannot decrypt those provider states.
+// portable developer message. Client compaction blobs without the gateway
+// prefix are treated as upstream original compact state and forwarded as-is.
+// A still-decryptable g2a_compact_v1 blob is expanded locally; an invalid
+// prefixed blob is rejected as a local 400. If Build rejects an original blob,
+// that upstream error is returned to the client.
 func expandGatewayCompactionHistory(body []byte, codec *gatewayCompactionCodec, session string) ([]byte, int, error) {
 	var payload map[string]any
 	if err := json.Unmarshal(body, &payload); err != nil {
@@ -94,7 +101,7 @@ func expandGatewayCompactionHistory(body []byte, codec *gatewayCompactionCodec, 
 	if !ok {
 		return body, 0, nil
 	}
-	foreign := 0
+	drifted := 0
 	changed := false
 	for index, raw := range items {
 		item, ok := raw.(map[string]any)
@@ -102,18 +109,20 @@ func expandGatewayCompactionHistory(body []byte, codec *gatewayCompactionCodec, 
 			continue
 		}
 		blob, _ := item["encrypted_content"].(string)
-		summary, owned, err := codec.decode(session, blob)
+		summary, owned, sessionDrifted, err := codec.decode(session, blob)
 		if err != nil {
-			foreign++
-			items[index] = compatibilityBoundaryMessage("A prior compacted context could not be decoded by this gateway instance. Continue from the retained conversation messages.")
-			changed = true
+			return body, drifted, &responsesRequestError{
+				Message: "The gateway compaction blob could not be decoded. Ensure it is unmodified and was issued by this gateway.",
+				Param:   fmt.Sprintf("input[%d].encrypted_content", index),
+				Code:    "invalid_compaction_blob",
+			}
+		}
+		if !owned {
 			continue
 		}
-		if owned {
-			items[index] = gatewayCompactionSummaryMessage(summary)
-		} else {
-			foreign++
-			items[index] = compatibilityBoundaryMessage("A compacted context created by another provider cannot be decoded by Grok Build. Continue from the retained conversation messages.")
+		items[index] = gatewayCompactionSummaryMessage(summary)
+		if sessionDrifted {
+			drifted++
 		}
 		changed = true
 	}
@@ -122,7 +131,7 @@ func expandGatewayCompactionHistory(body []byte, codec *gatewayCompactionCodec, 
 	}
 	payload["input"] = items
 	encoded, err := json.Marshal(payload)
-	return encoded, foreign, err
+	return encoded, drifted, err
 }
 
 // prepareGatewayCompactionSample mirrors Grok Build full-replace

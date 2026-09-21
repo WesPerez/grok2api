@@ -9,7 +9,9 @@ import (
 	"strings"
 	"time"
 
+	auditdomain "github.com/chenyme/grok2api/backend/internal/domain/audit"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
+	"github.com/chenyme/grok2api/backend/internal/infra/provider/cli"
 )
 
 var (
@@ -17,6 +19,10 @@ var (
 )
 
 func normalizeRequest(body []byte, spec ModelSpec) ([]byte, error) {
+	return normalizeRequestWithMetadata(body, spec, nil)
+}
+
+func normalizeRequestWithMetadata(body []byte, spec ModelSpec, metadata *provider.NormalizedRequestMetadata) ([]byte, error) {
 	var payload map[string]any
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return nil, fmt.Errorf("解析 Console Responses 请求: %w", err)
@@ -36,11 +42,63 @@ func normalizeRequest(body []byte, spec ModelSpec) ([]byte, error) {
 	if _, exists := payload["max_output_tokens"]; !exists && spec.MaxOutputTokens > 0 {
 		payload["max_output_tokens"] = spec.MaxOutputTokens
 	}
+	requestedEffort := metadata != nil && auditdomain.NormalizeReasoningEffort(metadata.ReasoningEffort) != ""
+	requestedEffort = requestedEffort || hasRecognizedConsoleReasoningEffort(payload)
 	normalizeReasoning(payload, spec)
+	updateConsoleReasoningMetadata(payload, spec, requestedEffort, metadata)
 	ensureReasoningInclude(payload)
-	retainedClientTools := normalizeConsoleTools(payload)
+	retainedClientTools, err := normalizeConsoleTools(payload)
+	if err != nil {
+		return nil, err
+	}
 	normalizeConsoleToolChoice(payload, retainedClientTools)
+	ensureConsoleToolChoicePair(payload)
 	return json.Marshal(payload)
+}
+
+// ensureConsoleToolChoicePair enforces the upstream invariant that tool_choice
+// may only be sent when at least one valid tool declaration is present.
+func ensureConsoleToolChoicePair(payload map[string]any) {
+	choice, hasChoice := payload["tool_choice"]
+	if !hasChoice || choice == nil {
+		return
+	}
+	tools, ok := payload["tools"].([]any)
+	if !ok || len(tools) == 0 {
+		delete(payload, "tools")
+		delete(payload, "tool_choice")
+	}
+}
+
+func hasRecognizedConsoleReasoningEffort(payload map[string]any) bool {
+	reasoning, _ := payload["reasoning"].(map[string]any)
+	effort, _ := reasoning["effort"].(string)
+	if strings.EqualFold(strings.TrimSpace(effort), "auto") {
+		return true
+	}
+	return normalizeEffort(effort) != ""
+}
+
+func updateConsoleReasoningMetadata(payload map[string]any, spec ModelSpec, requested bool, metadata *provider.NormalizedRequestMetadata) {
+	if metadata == nil {
+		return
+	}
+	previous := auditdomain.NormalizeReasoningEffort(metadata.ReasoningEffort)
+	metadata.ReasoningEffort = ""
+	if !requested || !spec.SupportsReasoning {
+		return
+	}
+	if !spec.SupportsReasoningEffort {
+		metadata.ReasoningEffort = "fixed"
+		return
+	}
+	reasoning, _ := payload["reasoning"].(map[string]any)
+	effort, _ := reasoning["effort"].(string)
+	if normalized := auditdomain.NormalizeReasoningEffort(effort); normalized != "" {
+		metadata.ReasoningEffort = normalized
+		return
+	}
+	metadata.ReasoningEffort = previous
 }
 
 func normalizeConsoleResponseFormat(payload map[string]any) {
@@ -202,19 +260,20 @@ func ensureReasoningInclude(payload map[string]any) {
 	payload["include"] = result
 }
 
-func normalizeConsoleTools(payload map[string]any) bool {
+func normalizeConsoleTools(payload map[string]any) (bool, error) {
 	value, exists := payload["tools"]
 	if !exists || value == nil {
 		delete(payload, "tools")
 		delete(payload, "tool_choice")
-		return false
+		return false, nil
 	}
 	tools, ok := value.([]any)
 	if !ok {
 		delete(payload, "tools")
 		delete(payload, "tool_choice")
-		return false
+		return false, nil
 	}
+	hasClientViewImage := hasConsoleFunctionTool(tools, "view_image")
 	result := make([]any, 0, len(tools))
 	retainedClientTools := false
 	for _, rawTool := range tools {
@@ -225,15 +284,46 @@ func normalizeConsoleTools(payload map[string]any) bool {
 		typeName, _ := tool["type"].(string)
 		switch strings.ToLower(strings.TrimSpace(typeName)) {
 		case "web_search", "web_search_preview", "web_search_preview_2025_03_11", "web_search_2025_08_26":
-			clean := map[string]any{"type": "web_search", "enable_image_understanding": true}
-			if enabled, ok := tool["enable_image_understanding"].(bool); ok {
+			// xAI equips web_search with a server-side tool also named view_image
+			// when image understanding is enabled. Prefer the client's function of
+			// that name so Codex can still inspect local files without mgw rejecting
+			// the request as a duplicate tool definition.
+			clean := map[string]any{"type": "web_search", "enable_image_understanding": !hasClientViewImage}
+			if enabled, ok := tool["enable_image_understanding"].(bool); ok && !hasClientViewImage {
 				clean["enable_image_understanding"] = enabled
+			}
+			// Forward the image-search toggle (enable_image_search) so clients
+			// can explicitly enable/disable it; absent when not requested.
+			if enabled, ok := tool["enable_image_search"].(bool); ok {
+				clean["enable_image_search"] = enabled
 			}
 			result = append(result, clean)
 		case "x_search":
 			clean := map[string]any{"type": "x_search", "enable_video_understanding": true}
 			if enabled, ok := tool["enable_video_understanding"].(bool); ok {
 				clean["enable_video_understanding"] = enabled
+			}
+			// Forward the X-search time bounds (from_date/to_date, YYYY-MM-DD).
+			// Invalid formats and empty strings are dropped; if from_date is
+			// later than to_date both are dropped to avoid an upstream 400.
+			for _, field := range []string{"from_date", "to_date"} {
+				text, ok := tool[field].(string)
+				if !ok || text == "" {
+					continue
+				}
+				if date, err := time.Parse("2006-01-02", text); err == nil && date.Format("2006-01-02") == text {
+					clean[field] = text
+				}
+			}
+			from, hasFrom := clean["from_date"].(string)
+			to, hasTo := clean["to_date"].(string)
+			if hasFrom && hasTo {
+				fromDate, _ := time.Parse("2006-01-02", from)
+				toDate, _ := time.Parse("2006-01-02", to)
+				if fromDate.After(toDate) {
+					delete(clean, "from_date")
+					delete(clean, "to_date")
+				}
 			}
 			result = append(result, clean)
 		case "function":
@@ -244,6 +334,14 @@ func normalizeConsoleTools(payload map[string]any) bool {
 			clean := map[string]any{"type": "function", "name": strings.TrimSpace(name)}
 			for _, field := range []string{"description", "parameters", "strict"} {
 				if fieldValue, exists := tool[field]; exists {
+					if field == "parameters" {
+						normalized, _, err := cli.NormalizeBuildFunctionParametersRoot(fieldValue, "tools.parameters", strings.TrimSpace(name))
+						if err != nil {
+							return false, err
+						}
+						clean[field] = normalized
+						continue
+					}
 					clean[field] = fieldValue
 				}
 			}
@@ -260,10 +358,25 @@ func normalizeConsoleTools(payload map[string]any) bool {
 	if len(result) == 0 {
 		delete(payload, "tools")
 		delete(payload, "tool_choice")
-		return false
+		return false, nil
 	}
 	payload["tools"] = result
-	return retainedClientTools
+	return retainedClientTools, nil
+}
+
+func hasConsoleFunctionTool(tools []any, target string) bool {
+	for _, rawTool := range tools {
+		tool, ok := rawTool.(map[string]any)
+		if !ok {
+			continue
+		}
+		typeName, _ := tool["type"].(string)
+		name, _ := tool["name"].(string)
+		if strings.EqualFold(strings.TrimSpace(typeName), "function") && strings.EqualFold(strings.TrimSpace(name), target) {
+			return true
+		}
+	}
+	return false
 }
 
 func normalizeConsoleToolChoice(payload map[string]any, retainedClientTools bool) {

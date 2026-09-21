@@ -12,6 +12,10 @@ const (
 	OperationImage      Operation = "image"
 	OperationImageEdit  Operation = "image_edit"
 	OperationVideo      Operation = "video"
+	OperationTTS        Operation = "tts"
+	OperationSTT        Operation = "stt"
+	OperationRealtime   Operation = "realtime"
+	OperationVoice      Operation = "voice"
 )
 
 type UsageSource string
@@ -65,19 +69,21 @@ const (
 	EgressModeProxy  EgressMode = "proxy"
 )
 
-// Record 表示推理请求审计；成功请求不保存正文，失败请求仅保留受限诊断快照。
+// Record 表示推理请求审计；成功请求通常不保存正文，仅允许保留 adapter 内部恢复失败的受限脱敏诊断。
 type Record struct {
 	ID                      uint64
 	EventID                 string
 	RequestID               string
 	ClientKeyID             uint64
 	ClientKeyName           string
+	ClientIP                string
 	ModelRouteID            uint64
 	ModelPublicID           string
 	ModelUpstreamModel      string
 	Provider                string
 	Operation               Operation
 	UsageSource             UsageSource
+	ReasoningEffort         string
 	AccountID               *uint64
 	AccountName             string
 	EgressNodeID            *uint64
@@ -105,6 +111,9 @@ type Record struct {
 	FirstTokenMS            *int64
 	DurationMS              int64
 	ErrorCode               string
+	RequestMethod           string
+	RequestPath             string
+	RequestHeaders          map[string][]string
 	AttemptCount            int
 	Attempts                []Attempt
 	CreatedAt               time.Time

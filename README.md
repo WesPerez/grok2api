@@ -26,13 +26,21 @@
 > [!NOTE]
 > This project is for technical research and learning purposes only. Please comply with Grok's official terms of use and local laws when using it; otherwise, you will be solely responsible for all consequences!
 
+
+
 ## Sponsors
+
 > [Want to sponsor this project?](mailto:chenyme03@gmail.com)
+
 
 <table>
 <tr>
-<td width="200" align="center" valign="middle"><a href="https://www.krill-ai.com/register?invite=KJ2VGIRVAE"><img src="https://raw.githubusercontent.com/Krill-ai-org/krill-ai-static/refs/heads/main/krill-logo/Eng/250x150.png" alt="Krill AI" width="160"></a></td>
-<td valign="middle">Krill AI provides fast, stable API access to GPT, Claude, Gemini, and leading Chinese models, with enterprise customization, invoicing, 7×16 support, and optimized WebSocket connections for faster first-token latency. Register through the <a href="https://www.krill-ai.com/register?invite=KJ2VGIRVAE">exclusive link</a> and use code “grok2api” for 23% off your first Codex package.</td>
+<td width="200" align="center" valign="middle"><a href="https://go.apimart.ai/gh-grok2api"><img src="frontend/public/sponner/api-mart.jpg" alt="APIMart" width="180"></a></td>
+<td valign="middle">Thanks to APIMart for sponsoring this project! APIMart is a low-cost API platform for AI image &amp; video generation — GPT-Image-2 from $0.006/image, 160+ images per dollar. One async API covers both image and video: submit a task, get an ID, fetch results via polling or callback. Batch tens of thousands of images without timeouts, switch models without changing code. Pay-as-you-go with no monthly fee — <a href="https://go.apimart.ai/gh-grok2api">sign up here</a> to get started.</td>
+</tr>
+<tr>
+<td width="200" align="center" valign="middle"><a href="https://www.packyapi.com/register"><img src="frontend/public/sponner/packycode.png" alt="PackyCode" width="180"></a></td>
+<td valign="middle">PackyCode is a stable and professional API relay for Claude Code, Codex, Gemini, and leading Chinese models. With fast unified access, full-stack observability, risk controls, elastic scaling, and cost optimization, it delivers a smooth developer experience. <a href="https://www.packyapi.com/register">Sign up here</a> to bring production-ready AI into your workflows.</td>
 </tr>
 <tr>
 <td width="200" align="center" valign="middle"><a href="https://github.com/DEEIX-AI/DEEIX-Chat"><img src="frontend/public/sponner/deeix-chat_deeix-ai.png" alt="DEEIX AI / DEEIX Chat" width="160"></a></td>
@@ -43,16 +51,13 @@
 <td valign="middle">Right Code is an enterprise-grade AI Agent distribution platform that primarily provides stable access services for Claude Code, Codex, Gemini, and other models. It supports invoicing and dedicated one-to-one assistance for enterprises and teams. Thanks to Right Code for providing token support. Click <a href="https://www.right.codes/register">here</a> to register and get started.</td>
 </tr>
 <tr>
-<td width="200" align="center" valign="middle"><a href="https://api.fenno.ai/s/xCBS"><img src="frontend/public/sponner/fenno-ai.jpg" alt="FennoAI" width="160"></a></td>
-<td valign="middle">FennoAI provides enterprise-grade OpenAI/Anthropic-compatible APIs for Codex, Claude Code, and OpenCode, processing hundreds of billions of tokens daily with global business settlement and invoicing. Through the Grok2API <a href="https://api.fenno.ai/s/xCBS">exclusive offer</a>, USD 1.99 unlocks USD 50 in Coding Plan credits, plus referral commissions up to 20%.</td>
-</tr>
-<tr>
-<td width="200" align="center" valign="middle"><a href="https://s.qiniu.com/RNNZFf"><img src="frontend/public/sponner/qiniu.jpg" alt="Qiniu Cloud AI" width="160"></a></td>
-<td valign="middle">Qiniu Cloud AI, Qiniu Cloud’s (02567.HK) enterprise MaaS platform, offers protocol-compatible access to 150+ global models for text, image, audio, video, and files, serving 1.69+ million users. Grok2API registrations through the <a href="https://s.qiniu.com/RNNZFf">exclusive link</a> receive 12 million free enterprise tokens or 3 million developer tokens.</td>
+<td width="200" align="center" valign="middle"><a href="https://www.swiftproxy.net/?ref=grok2api"><img src="frontend/public/sponner/swift-proxy.png" alt="Swiftproxy" width="180"></a></td>
+<td valign="middle">Swiftproxy provides 90M+ clean residential IPs across 220+ locations, supporting HTTP(S)/SOCKS5, IP rotation, Sticky Sessions, and precise location targeting. It helps API services and automation workflows access online platforms reliably from different locations, making it suitable for API requests, automation, data collection, and location-based access. Residential proxies start at $0.7/GB. Free testing is available, and code PROXY90 gives 10% off. <a href="https://www.swiftproxy.net/?ref=grok2api">Try Swiftproxy now</a>.</td>
 </tr>
 </table>
 
 <br>
+
 
 ## Overview
 
@@ -126,30 +131,38 @@ flowchart LR
     class Upstream upstream
 ```
 
+
+
 The Gateway routes requests through the Provider Registry. Account Sync refreshes credentials, quota, and models. Each Provider keeps independent account state and uses an isolated egress scope; usage, audits, and client billing are finalized after the request.
 
 ### Core capabilities
 
-| Area | Capabilities |
-| :-- | :-- |
-| APIs | Responses, Chat Completions, Anthropic Messages, Images, and asynchronous Videos |
-| Clients | Codex, Claude Code, OpenAI-compatible SDKs, and Anthropic-compatible SDKs |
-| Accounts | Bulk import/export, quota sync, credential renewal, conversion, tools, and cleanup |
-| Routing | Model discovery, Provider pinning, sticky sessions, quota/concurrency guards, and bounded failover |
-| Sessions | Stored responses, compact, prompt-cache affinity, and optional reasoning replay |
-| Media | Image generation/editing, video jobs, local archiving, and URL/Base64/SSE output |
-| Egress | HTTP/SOCKS/Resin, subscriptions, probes, proxy pools, allocation, fallback, and FlareSolverr |
-| Operations | Dashboard, model routes, client keys, audits, runtime settings, and media libraries |
+
+| Area       | Capabilities                                                                                                                            |
+| ---------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| APIs       | Responses, Chat Completions, Anthropic Messages, Images, and asynchronous Videos                                                        |
+| Clients    | Codex, Claude Code, OpenAI-compatible SDKs, and Anthropic-compatible SDKs                                                               |
+| Accounts   | Bulk import/export, quota sync, credential renewal, conversion, tools, and cleanup                                                      |
+| Routing    | Model discovery, Provider pinning, sticky sessions, quota/concurrency guards, and bounded failover                                      |
+| Sessions   | Stored responses, compact, prompt-cache affinity, and optional reasoning replay                                                         |
+| Media      | Image generation/editing, video jobs, local archiving, and URL/Base64/SSE output                                                        |
+| Egress     | HTTP/SOCKS/Resin and Trojan/VLESS/Shadowsocks/VMess tunnels, subscriptions, probes, proxy pools, allocation, fallback, and FlareSolverr |
+| Operations | Dashboard, model routes, client keys, audits, runtime settings, and media libraries                                                     |
+
+
+
 
 ### Provider boundaries
 
-| Provider | Authentication | Models | Main capabilities |
-| :-- | :-- | :-- | :-- |
-| Grok Build | OAuth / Device OAuth | Discovered per account | Responses, Chat, Messages, compact, stored responses, paid-account video |
-| Grok Web | SSO | Built-in, filtered by tier | Responses, Chat, Messages, stored responses, images, image editing, video |
-| Grok Console | SSO | Built-in | Stateless Responses, Chat, Messages, images, image editing, video |
 
-Each Provider keeps its own credentials, quota, health, cooldown, concurrency, and model capabilities. Failover stays within the selected Provider.
+| Provider     | Authentication       | Models                     | Main capabilities                                                                     |
+| ------------ | -------------------- | -------------------------- | ------------------------------------------------------------------------------------- |
+| Grok Build   | OAuth / Device OAuth | Discovered per account     | Responses, Chat, Messages, compact, stored responses, paid-account video              |
+| Grok Web     | SSO                  | Built-in, filtered by tier | Responses, Chat, Messages, stored responses, images, image editing, video             |
+| Grok Console | SSO                  | Built-in                   | Stateless Responses, Chat, Messages, images, image editing, video, TTS, STT, Realtime |
+
+
+Each Provider keeps its own credentials, quota, health, cooldown, concurrency, and model capabilities. Account retries stay within one route; when one public model ID intentionally aggregates multiple routes, the gateway may select another schedulable route without mixing Provider state.
 
 ## Quick start
 
@@ -203,6 +216,8 @@ pnpm install
 pnpm dev
 ```
 
+
+
 ## Set up the gateway
 
 1. Sign in with the bootstrap administrator.
@@ -216,13 +231,17 @@ After first sign-in, change the administrator password and remove `bootstrapAdmi
 
 ### Account operations
 
-| Provider | Connect or import | Export |
-| :-- | :-- | :-- |
-| Build | Device OAuth, JSON/JSONL | Re-importable account file |
-| Web | Pasted/TXT SSO, JSON/JSONL | Re-importable account file |
-| Console | Pasted/TXT SSO, JSON/JSONL | Re-importable account file |
+
+| Provider | Connect or import          | Export                     |
+| -------- | -------------------------- | -------------------------- |
+| Build    | Device OAuth, JSON/JSONL   | Re-importable account file |
+| Web      | Pasted/TXT SSO, JSON/JSONL | Re-importable account file |
+| Console  | Pasted/TXT SSO, JSON/JSONL | Re-importable account file |
+
 
 Imports accept UTF-8 BOM. Bulk quota sync, Build credential renewal, Web→Build/Console conversion, account tools, and cleanup report live progress.
+
+Build refresh tokens may rotate when renewed. Do not actively share one Build credential between grok2api, the official CLI, another gateway, or another independent client: one client can consume a token that another client still holds. Authorize each active client separately, or transfer the credential only after the previous client has stopped using it.
 
 Web account tools can accept the terms, set a random birthday corresponding to an age of 20–40, and enable NSFW. Completed steps are recorded and skipped on later runs.
 
@@ -230,6 +249,8 @@ Automatic deletion of old `reauthRequired` accounts is available but disabled by
 
 > [!TIP]
 > To migrate from the Python version, export Grok Web SSO tokens as TXT and import them under **Grok Web**. Old pool metadata and databases are not compatible.
+
+
 
 ## Models and routing
 
@@ -239,11 +260,13 @@ Build models are discovered from each account's actual capabilities. Web and Con
 
 Build does not use one global static model list. Account synchronization reads the upstream `/models` endpoint, and different accounts, subscription tiers, or staged rollouts may expose different models. Routing retains these per-account capabilities instead of replacing the global catalog with one account's response.
 
-| Model | Type | Availability | Gateway surfaces |
-| :-- | :-- | :-- | :-- |
-| Conversation models returned by upstream `/models` (for example, `grok-4.5`) | Conversation | Returned by the selected account | Chat Completions, Responses, Messages, compact, stored responses |
-| `grok-composer-2.5-fast` | Conversation | Grok Build OAuth accounts | Chat Completions, Responses, Messages; supplemented from the OAuth session contract when a sparse upstream catalog omits it |
-| `grok-imagine-video-1.5` | Video | Super/paid Build accounts | Videos; not assigned to Free or unknown-entitlement accounts |
+
+| Model                                                                        | Type         | Availability                     | Gateway surfaces                                                                                                            |
+| ---------------------------------------------------------------------------- | ------------ | -------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| Conversation models returned by upstream `/models` (for example, `grok-4.5`) | Conversation | Returned by the selected account | Chat Completions, Responses, Messages, compact, stored responses                                                            |
+| `grok-composer-2.5-fast`                                                     | Conversation | Grok Build OAuth accounts        | Chat Completions, Responses, Messages; supplemented from the OAuth session contract when a sparse upstream catalog omits it |
+| `grok-imagine-video-1.5`                                                     | Video        | Super/paid Build accounts        | Videos; not assigned to Free or unknown-entitlement accounts                                                                |
+
 
 Conversation requests are translated to the Build Responses protocol while preserving the tool, reasoning, multi-turn, and prompt-cache compatibility required by Codex and Claude Code. Build currently exposes no image generation or image editing routes.
 
@@ -251,32 +274,43 @@ Conversation requests are translated to the Build Responses protocol while prese
 
 Web uses a built-in catalog filtered by account tier; higher tiers inherit lower-tier models.
 
-| Model | Type | Minimum tier | Gateway surfaces |
-| :-- | :-- | :-- | :-- |
-| `grok-chat-fast` | Conversation | Basic | Chat Completions, Responses, Messages |
-| `grok-chat-auto` | Conversation | Super | Chat Completions, Responses, Messages |
-| `grok-chat-expert` | Conversation | Super | Chat Completions, Responses, Messages |
-| `grok-chat-heavy` | Conversation | Heavy | Chat Completions, Responses, Messages |
-| `grok-imagine-image-lite` | Image | Basic | Images Generations |
-| `grok-imagine-image-quality-lite` | Image | Super | Images Generations |
-| `grok-imagine-image-edit` | Image Edit | Super | Images Edits |
-| `grok-imagine-video` | Video | Super | Videos |
+
+| Model                     | Type         | Minimum tier                   | Gateway surfaces                        |
+| ------------------------- | ------------ | ------------------------------ | --------------------------------------- |
+| `grok-chat-fast`          | Conversation | Basic                          | Chat Completions, Responses, Messages   |
+| `grok-chat-auto`          | Conversation | Super                          | Chat Completions, Responses, Messages   |
+| `grok-chat-expert`        | Conversation | Super                          | Chat Completions, Responses, Messages   |
+| `grok-chat-heavy`         | Conversation | Heavy                          | Chat Completions, Responses, Messages   |
+| `grok-imagine-image-lite` | Image        | Basic                          | Images Generations                      |
+| `grok-imagine-image`      | Image        | Basic                          | Images Generations (`enable_pro=false`) |
+| `grok-imagine-image-2.0`  | Image        | Basic                          | Images Generations (`enable_pro=true`)  |
+| `grok-imagine-image-edit` | Image Edit   | Basic                          | Images Edits                            |
+| `grok-imagine-video`      | Video        | Basic for 720p; Super for 480p | Videos                                  |
+
+
+Web Imagine generation maps `aspect_ratio` and `n` to the browser protocol. `size` remains an OpenAI-compatible aspect-ratio alias, while generation-only `resolution` and `quality` are ignored on Web routes because the upstream product is selected by the model name rather than by those Console-oriented controls.
 
 ### Grok Console
 
-Console uses the catalog built into the current release. Conversation forwarding is stateless, while image and video models use the standard xAI resource APIs.
+Console uses the catalog built into the current release. Conversation forwarding is stateless, while image, video, and voice use the standard xAI resource APIs.
 
-| Model | Type | Gateway surfaces |
-| :-- | :-- | :-- |
-| `grok-4.20-0309-non-reasoning` | Conversation | Chat Completions, Responses, Messages |
-| `grok-4.20-0309-reasoning` | Conversation | Chat Completions, Responses, Messages; the model reasons but the upstream rejects configurable `reasoningEffort` |
-| `grok-4.20-multi-agent-0309` | Conversation | Chat Completions, Responses, Messages |
-| `grok-4.5` | Conversation | Chat Completions, Responses, Messages |
-| `grok-4.3` | Conversation | Chat Completions, Responses, Messages |
-| `grok-build-0.1` | Conversation | Chat Completions, Responses, Messages |
-| `grok-imagine-image` | Image, Image Edit | Images Generations, Images Edits |
-| `grok-imagine-image-quality` | Image, Image Edit | Images Generations, Images Edits |
-| `grok-imagine-video` | Video | Videos |
+
+| Model                                                                         | Type              | Gateway surfaces                                                                                                 |
+| ----------------------------------------------------------------------------- | ----------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `grok-4.20-0309-non-reasoning`                                                | Conversation      | Chat Completions, Responses, Messages                                                                            |
+| `grok-4.20-0309-reasoning`                                                    | Conversation      | Chat Completions, Responses, Messages; the model reasons but the upstream rejects configurable `reasoningEffort` |
+| `grok-4.20-multi-agent-0309`                                                  | Conversation      | Chat Completions, Responses, Messages                                                                            |
+| `grok-4.5`                                                                    | Conversation      | Chat Completions, Responses, Messages                                                                            |
+| `grok-4.3`                                                                    | Conversation      | Chat Completions, Responses, Messages                                                                            |
+| `grok-build-0.1`                                                              | Conversation      | Chat Completions, Responses, Messages                                                                            |
+| `grok-imagine-image`                                                          | Image, Image Edit | Images Generations, Images Edits                                                                                 |
+| `grok-imagine-image-quality`                                                  | Image, Image Edit | Images Generations, Images Edits                                                                                 |
+| `grok-imagine-image-2.0`                                                      | Image, Image Edit | Images Generations, Images Edits                                                                                 |
+| `grok-imagine-video`                                                          | Video             | Videos                                                                                                           |
+| `grok-imagine-video-1.5`                                                      | Video             | Video generation, including Free Console accounts                                                                |
+| `grok-voice-latest`, `grok-voice-think-fast-2.0`, `grok-voice-think-fast-1.0` | Voice             | TTS and Realtime WebSocket proxy                                                                                 |
+| `grok-stt`                                                                    | Voice             | STT and OpenAI-compatible audio transcriptions                                                                   |
+
 
 Generation and editing capabilities for the same Console image model are grouped into one logical model row; no separate `-edit` model copy is required.
 
@@ -286,7 +320,7 @@ Web can be weakly linked one-to-one with matching Build and Console accounts. Li
 
 ### Codex, Claude Code, and prompt caching
 
-Responses and Messages support streaming, tools, reasoning, multi-turn sessions, and compaction. Stable client session signals are preserved for Grok Build prompt-cache affinity. Cache hits still require a compatible upstream account and an unchanged prompt prefix.
+Responses and Messages support streaming, tools, reasoning, multi-turn sessions, and compaction. Stable client session signals are preserved for Grok Build prompt-cache affinity. Cache hits still require a compatible upstream account and an unchanged prompt prefix. A still-decryptable `g2a_compact_v1` summary from this gateway instance is expanded even if the session or PromptCacheKey remaps; an invalid prefixed blob is rejected with 400. Other compaction blobs keep their original `encrypted_content` when forwarded as upstream state, and any Build rejection is returned to the client.
 
 Responses and Chat Completions report OpenAI-style total input. Messages reports Anthropic-style uncached input and cache reads separately. Audits retain total and cached input for billing reconciliation.
 
@@ -298,20 +332,27 @@ Inference endpoints use a client key:
 Authorization: Bearer g2a_xxx_xxx
 ```
 
-| Method | Path | Purpose |
-| :-- | :-- | :-- |
-| `GET` | `/healthz`, `/readyz` | Liveness and readiness |
-| `GET` | `/v1/models` | Serviceable models |
-| `POST` | `/v1/responses` | Responses JSON/SSE |
-| `POST` | `/v1/responses/compact` | Compact a supported Response session |
-| `GET`, `DELETE` | `/v1/responses/{id}` | Read or delete a stored response |
-| `POST` | `/v1/chat/completions` | Chat Completions JSON/SSE |
-| `POST` | `/v1/messages` | Anthropic Messages JSON/SSE |
-| `POST` | `/v1/images/generations`, `/v1/images/edits` | Generate or edit images |
-| `POST`, `GET` | `/v1/videos/*` | Create and inspect video jobs |
-| `GET` | `/v1/media/images/{asset_id}`, `/v1/media/videos/{asset_id}` | Read archived media |
+
+| Method          | Path                                                         | Purpose                              |
+| --------------- | ------------------------------------------------------------ | ------------------------------------ |
+| `GET`           | `/healthz`, `/readyz`                                        | Liveness and readiness               |
+| `GET`           | `/v1/models`                                                 | Serviceable models                   |
+| `POST`          | `/v1/responses`                                              | Responses JSON/SSE                   |
+| `POST`          | `/v1/responses/compact`                                      | Compact a supported Response session |
+| `GET`, `DELETE` | `/v1/responses/{id}`                                         | Read or delete a stored response     |
+| `POST`          | `/v1/chat/completions`                                       | Chat Completions JSON/SSE            |
+| `POST`          | `/v1/messages`                                               | Anthropic Messages JSON/SSE          |
+| `POST`          | `/v1/images/generations`, `/v1/images/edits`                 | Generate or edit images              |
+| `POST`, `GET`   | `/v1/videos/*`                                               | Create and inspect video jobs        |
+| `POST`          | `/v1/tts`, `/v1/audio/speech`, `/v1/audio/tasks`             | Synthesize speech                    |
+| `POST`          | `/v1/stt`, `/v1/audio/transcriptions`                        | Transcribe audio                     |
+| `GET`           | `/v1/stt`, `/v1/realtime`                                    | Proxy voice WebSocket sessions       |
+| `GET`           | `/v1/media/images/{asset_id}`, `/v1/media/videos/{asset_id}` | Read archived media                  |
+
 
 Stored responses and compact depend on the selected Provider. The signed-in admin console provides live examples at `/docs`; Swagger is available only when `server.swaggerEnabled: true`.
+
+`/v1/audio/transcriptions` supports `json` (default), `verbose_json`, and `text`. Video edit/extension routes must resolve to Console `grok-imagine-video`; custom public model names remain supported. Monetary billing is applied only when the gateway can reliably measure the official pricing unit: TTS is reserved and settled from its input character count, while REST and streaming STT are settled from the actual audio duration returned by a successful response. Because STT duration is known only after completion, concurrent requests may briefly take a billing-limited key beyond its spend limit. Realtime, video edits/extensions, and custom routes without a recognized official price are currently audited as unpriced; they remain callable and do not consume the spend limit.
 
 Client keys support model allowlists and optional RPM, concurrency, spend, and expiry limits.
 
@@ -326,17 +367,23 @@ curl http://127.0.0.1:8000/v1/responses \
   }'
 ```
 
+
+
 ## Egress and Cloudflare
 
 Egress nodes are scoped to Build, Web, Console, or Web assets. The admin console supports:
 
-- HTTP, HTTPS, SOCKS4/4A, SOCKS5/5H, and Resin
+- HTTP, HTTPS, SOCKS4/4A, SOCKS5/5H, Resin, Trojan, VLESS, Shadowsocks, and VMess
+- TCP, WebSocket, and TLS tunnel transports; unsupported variants are rejected during import
 - Subscription and text/Base64 import
 - Batch probes, filtering, deletion, assignment, and balancing
 - Fallback per scope: none, direct, or a fixed node
 - Proxy-pool mode without global cooldown after one connection failure
 - Immediate recovery probes after fixed-proxy transport failures, with per-node coalescing and bounded waiting for fast retry
 - Optional [Egress Quality Guard](./tools/egress-quality-guard/README.md) for active per-node model probes, guarded quarantine, and recovery; enable it with the built-in `quality-guard` Compose profile
+- Nodes whose proxy username contains `{account}` are treated as lease-scoped: a passive anomaly temporarily removes only the audited account lease, then recovery pins the probe to that same account and node. An unhealthy probe renews the hold; an expired hold no longer blocks routing if the sidecar is unavailable, so stale guard state cannot strand an account indefinitely. The shared node is never disabled and the rendered proxy identity is never exposed. Ordinary fixed sticky sessions can still be managed as separate nodes
+
+Hysteria and TUIC are not supported yet. FlareSolverr accepts only HTTP/SOCKS proxy URLs, so automatic clearance refresh cannot use a tunnel share URL directly.
 
 To enable the guard, add a `qualityGuard` section to `config.yaml`, then start
 the profile. The main service creates and reuses a non-exportable system probe
@@ -346,7 +393,21 @@ identity automatically:
 qualityGuard:
   enabled: true
   model: "grok-4.6"
+  # Withhold thinking-model streams that have no streamed reasoning.
+  # Observe for up to 30s. A stub plus enough visible output at the deadline
+  # is withheld; empty stub-only streams keep waiting. Floor-met dumps that
+  # flush a short greeting in under 1s are also withheld.
+  requestRetry:
+    enabled: true
+    maxAttempts: 6
+    holdTimeout: 30s
+    minOutputTokens: 8
+    onExhausted: fail_closed # fail_open | fail_closed
+    accountCooldown: 12h
+    idleAccountCooldown: 15m
 ```
+
+`requestRetry` runs on the gateway request path and is independent of the sidecar. `config.example.yaml` keeps `enabled: false`; set it true to intercept. When enabled, a thinking-model stream with enough visible output and no streamed reasoning is **not delivered**; replay-safe stateless requests may try another account. TUI follow-ups (`previous_response_id`) and hosted-tool turns are still held for classification, but a quality withhold never replays account-bound state or side-effecting tools across accounts; `onExhausted` returns `503 quality_degraded` or releases that held body. Context compaction, image, video, and ForcedEgress probe requests are unchanged.
 
 ```bash
 docker compose --profile quality-guard up -d --build
@@ -377,7 +438,12 @@ For managed Web/Console Cloudflare Clearance:
 docker compose --profile flaresolverr up -d
 ```
 
-Then select `FlareSolverr` under **Runtime Settings → Media & Network → Clearance** and use `http://flaresolverr:8191`.
+Then use `http://flaresolverr:8191` under **Runtime Settings → Media & Network → Clearance** and select one of the managed modes:
+
+- `FlareSolverr` proactively refreshes stale fixed-egress Clearance on the configured schedule.
+- `On demand` keeps the last successful Clearance regardless of age and solves again only after an upstream rejection explicitly invalidates it. Scheduled refresh does not launch a browser in this mode.
+
+`Manual` never invokes FlareSolverr. The on-demand mode can make the first request without a managed Clearance; if Cloudflare rejects it, the next lease performs one deduplicated solve.
 
 The egress layer retries only connection failures known to occur before request submission. It does not replay submitted generation requests, authentication failures, exhausted quotas, or upstream rate limits.
 
@@ -387,10 +453,12 @@ When a fixed proxy enters cooldown after a transport failure, grok2api starts an
 
 `config.yaml` contains startup settings; Provider and operational settings are managed in the admin console and hot-reload unless marked otherwise.
 
-| Deployment | Database | Runtime store | Media |
-| :-- | :-- | :-- | :-- |
-| Single instance | SQLite | Memory | Local directory |
-| Multiple instances | PostgreSQL | Redis | Shared read/write directory |
+
+| Deployment         | Database   | Runtime store | Media                       |
+| ------------------ | ---------- | ------------- | --------------------------- |
+| Single instance    | SQLite     | Memory        | Local directory             |
+| Multiple instances | PostgreSQL | Redis         | Shared read/write directory |
+
 
 Multi-instance deployments require a unique `deployment.instanceID` per replica, one shared `clusterID`, and `sharedMedia: true` only after the media directory is shared correctly.
 
@@ -402,13 +470,52 @@ GROK2API_DATABASE_URL='postgresql://user:password@host:5432/grok2api?sslmode=req
 
 A non-empty `GROK2API_DATABASE_URL` overrides `database.postgres.dsn` and automatically selects the `postgres` driver. An empty value is ignored. Supported URL schemes are `postgres://` and `postgresql://`; SQLAlchemy's `postgresql+asyncpg://` form is rejected with a migration hint. The application does not implicitly read the generic `DATABASE_URL`; platforms that provide it can map it explicitly with `GROK2API_DATABASE_URL: "${DATABASE_URL}"`. Database configuration precedence is built-in defaults, `config.yaml`, then `GROK2API_DATABASE_URL`. The current CLI has no database override.
 
+### Client IPs behind a reverse proxy
+
+Request audits record the normalized client IPv4 or IPv6 address. Direct deployments need no extra configuration. Behind Nginx or another reverse proxy, configure both sides:
+
+1. Forward the standard client IP headers from the proxy:
+
+```nginx
+location / {
+    proxy_pass http://127.0.0.1:8000;
+
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
+```
+
+1. Trust only the proxy address or its isolated network in `config.yaml`:
+
+```yaml
+server:
+  trustedProxies:
+    - "127.0.0.1"
+```
+
+With Docker, the peer seen by grok2api may be the bridge gateway or another container rather than `127.0.0.1`. Inspect the Compose network before configuring it:
+
+```bash
+docker network inspect grok2api_default \
+  --format '{{(index .IPAM.Config 0).Subnet}}'
+```
+
+For example, an isolated network reported as `172.20.0.0/16` can be configured as a trusted proxy CIDR. Never use `0.0.0.0/0` or `::/0`; grok2api rejects unrestricted trusted-proxy ranges. Without `trustedProxies`, forwarded headers are ignored and audits contain the direct TCP peer address, preventing clients from spoofing `X-Forwarded-For`.
+
+If Cloudflare is in front of Nginx, configure Nginx's real-IP module with `CF-Connecting-IP` and Cloudflare's official proxy ranges first. Do not trust `CF-Connecting-IP` from arbitrary peers. Restart grok2api after changing `server.trustedProxies`; reload Nginx after changing its configuration.
+
 Important optional settings:
 
 - `audit.ledgerMode`: `observe` reports ledger faults; `enforce` can pause new inference to protect billing integrity.
 - `routing.accountIsolatedConnections`: partitions outbound TCP/HTTP pools by account for external L4 or connection-hash load balancers. It is off by default because it increases connections, TLS handshakes, memory, and file-descriptor usage.
-- `routing.segmentedSelectorEnabled`: optimizes large account pools while retaining full-planner fallback and atomic guards.
+- `routing.segmentedSelectorEnabled`: enabled by default for pools with at least 3,000 eligible accounts; bounds dynamic concurrency reads while retaining quota/tier priorities, sticky sessions, full-planner fallback, and atomic guards.
+- `routing.autoAssignMaxNodeShare` / `routing.autoAssignMaxMigrationShare`: optional large-pool guards. `0` (default) keeps the historical unbounded first-pass evacuation and the existing 200-move ceiling for capacity/rebalance repair. Set `0.05`–`1` only when a quarantined node would otherwise dump thousands of auto accounts onto the last healthy exits. `GROK2API_AUTO_ASSIGN_MAX_NODE_SHARE` and `GROK2API_AUTO_ASSIGN_MAX_MIGRATION_SHARE` override the YAML when set.
 - Build response-header timeout and exact-match 403 invalidation rules are hot-reloadable.
 - **Sync latest version** applies the validated Grok Build client version and User-Agent.
+
+
 
 ## Production checklist
 
@@ -418,6 +525,8 @@ Important optional settings:
 - Back up `config.yaml`, the database, and media storage.
 - Use PostgreSQL, Redis, and shared media for multiple instances.
 - Put a reverse proxy and access controls in front of public deployments.
+
+
 
 ## Development
 
@@ -441,6 +550,8 @@ Regenerate Swagger after changing public API annotations:
 ```bash
 make swagger
 ```
+
+
 
 ## Documentation
 

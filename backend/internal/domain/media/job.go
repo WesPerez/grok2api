@@ -18,12 +18,24 @@ const MaxInputJSONBytes = 32 << 20
 // MaxInputImages is the maximum number of reference images accepted for a video job.
 const MaxInputImages = 8
 
+// MaxInputAssetBytes limits each temporary image or video input to 20 MiB.
+const MaxInputAssetBytes = 20 << 20
+
+type VideoOperation string
+
+const (
+	VideoOperationGenerate VideoOperation = "generate"
+	VideoOperationEdit     VideoOperation = "edit"
+	VideoOperationExtend   VideoOperation = "extend"
+)
+
 // Job 表示可跨进程重启恢复的异步视频任务。
 type Job struct {
 	ID              string
 	RequestID       string
 	ClientKeyID     uint64
 	ClientKeyName   string
+	ClientIP        string
 	AccountID       uint64
 	AccountName     string
 	EgressNodeID    *uint64
@@ -34,6 +46,7 @@ type Job struct {
 	Model           string
 	ModelRouteID    uint64
 	UpstreamModel   string
+	Operation       VideoOperation
 	Prompt          string
 	Seconds         int
 	Size            string

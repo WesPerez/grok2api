@@ -16,7 +16,7 @@ import (
 
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	domainegress "github.com/chenyme/grok2api/backend/internal/domain/egress"
-	"github.com/chenyme/grok2api/backend/internal/infra/egress"
+	settingsdomain "github.com/chenyme/grok2api/backend/internal/domain/settings"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 )
 
@@ -42,6 +42,49 @@ func (e *webMediaUpstreamError) HTTPStatusCode() int {
 		return 0
 	}
 	return e.status
+}
+
+// isClearanceRefreshableMediaError distinguishes browser-session challenges
+// from structured upstream policy responses such as content moderation. Empty
+// and HTML 403 bodies are the forms returned by the media endpoints when the
+// request is rejected before the application response is built.
+func isClearanceRefreshableMediaError(e *webMediaUpstreamError) bool {
+	if e == nil || e.status != http.StatusForbidden {
+		return false
+	}
+	return e.cloudflareChallenge || e.bodyKind == "empty" || e.bodyKind == "html"
+}
+
+// isStatsigRefreshableMediaError identifies application-layer rejections that
+// tell the browser to reload its page state. Grok uses code 7 for this anti-bot
+// response, but the same code can also wrap a definitive account block; blocked
+// credentials must remain terminal and must not be replayed with a fresh signature.
+func isStatsigRefreshableMediaError(e *webMediaUpstreamError, body []byte) bool {
+	if e == nil || e.status != http.StatusForbidden || e.bodyKind != "json" || provider.IsDefinitiveAccountBlockBody(body) {
+		return false
+	}
+	code, message, structured := extractWebMediaUpstreamErrorFields(body)
+	if !structured {
+		return false
+	}
+	normalized := strings.ToLower(message)
+	return code == "7" || strings.Contains(normalized, "anti-bot") ||
+		strings.Contains(normalized, "page is out of date") || strings.Contains(normalized, "reload to continue")
+}
+
+func (e *webMediaUpstreamError) providerResponse() *provider.Response {
+	if e == nil {
+		return nil
+	}
+	code := "upstream_forbidden"
+	if e.status != http.StatusForbidden {
+		code = "upstream_unavailable"
+	}
+	return jsonProviderResponse(e.status, map[string]any{"error": map[string]any{
+		"message": e.summary,
+		"type":    "upstream_error",
+		"code":    code,
+	}})
 }
 
 const (
@@ -208,46 +251,33 @@ func boundWebMediaDiagnostic(value string, limit int) string {
 }
 
 func (a *Adapter) GenerateVideo(ctx context.Context, request provider.VideoRequest) (provider.VideoResult, error) {
+	if strings.TrimSpace(request.ImageURL) != "" || len(request.ReferenceURLs) > 0 {
+		return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoStagePrepare, 0, fmt.Errorf("Grok Web 当前仅支持文本生视频；图片视频请使用 Build 或 Console Provider"))
+	}
 	cfg := a.config()
 	token, err := a.cipher.Decrypt(request.Credential.EncryptedAccessToken)
 	if err != nil {
-		return provider.VideoResult{}, err
+		return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoStagePrepare, 0, err)
 	}
 	lease, err := a.egress.AcquireCredential(ctx, domainegress.ScopeWeb, request.Credential)
 	if err != nil {
-		return provider.VideoResult{}, err
+		return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoStagePrepare, 0, err)
 	}
 	defer lease.Release()
-	parentID := ""
-	references := make([]string, 0, len(request.ReferenceURLs))
-	for _, rawReference := range request.ReferenceURLs {
-		reference, referenceErr := a.prepareVideoReference(ctx, cfg, lease, token, rawReference)
-		if referenceErr != nil {
-			return provider.VideoResult{}, referenceErr
-		}
-		references = append(references, reference)
+	if len(videoSegments(request.Duration)) == 0 {
+		return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoStagePrepare, 0, fmt.Errorf("duration 必须在 1 到 15 秒之间"))
 	}
-	if len(references) > 0 {
-		parentID, err = a.createMediaPost(ctx, cfg, lease, token, "MEDIA_POST_TYPE_IMAGE", references[0], "", "video_reference_media_post")
-	} else {
-		parentID, err = a.createMediaPost(ctx, cfg, lease, token, "MEDIA_POST_TYPE_VIDEO", "", request.Prompt, "video_prompt_media_post")
-	}
-	if err != nil {
-		return provider.VideoResult{}, err
-	}
-	segments := videoSegments(request.Duration)
-	if len(segments) == 0 {
-		return provider.VideoResult{}, fmt.Errorf("duration 必须在 1 到 15 秒之间")
-	}
+	seconds := applyFreeWebVideoDurationCap(request.Duration, cfg.FreeVideoDurationCap, request.Credential)
+	segments := videoSegments(seconds)
 	ratio := resolveAspectRatio(request.AspectRatio)
 	resolution := request.Resolution
 	if resolution == "" {
 		resolution = "720p"
 	}
-	payload := videoCreatePayload(request.Prompt, parentID, ratio, resolution, segments[0], references)
+	payload := videoCreatePayload(request.Prompt, ratio, resolution, segments[0])
 	response, err := a.postJSON(ctx, cfg, lease, token, cfg.BaseURL+"/rest/app-chat/conversations/new", payload, time.Duration(cfg.VideoTimeoutSeconds)*time.Second)
 	if err != nil {
-		return provider.VideoResult{}, err
+		return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoCreateFailureStage(err), 0, err)
 	}
 	result, _, parseErr := parseVideoStream(response, request.Progress)
 	_ = response.Body.Close()
@@ -255,31 +285,16 @@ func (a *Adapter) GenerateVideo(ctx context.Context, request provider.VideoReque
 		if upstreamErr, ok := parseErr.(*webMediaUpstreamError); ok {
 			a.logWebMediaUpstreamRejection("video_generation", response, upstreamErr)
 		}
-		return provider.VideoResult{}, parseErr
+		stage := provider.VideoStagePoll
+		if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+			stage = provider.VideoCreateFailureStage(parseErr)
+		}
+		return provider.VideoResult{}, provider.WrapVideoStage(stage, 0, parseErr)
 	}
 	if result.URL == "" {
-		return provider.VideoResult{}, fmt.Errorf("视频生成完成但没有返回内容 URL")
+		return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoStagePoll, 0, fmt.Errorf("视频生成完成但没有返回内容 URL"))
 	}
 	return result, nil
-}
-
-func (a *Adapter) prepareVideoReference(ctx context.Context, cfg Config, lease *egress.Lease, token, value string) (string, error) {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return "", fmt.Errorf("视频参考图片 URL 不能为空")
-	}
-	image, err := a.loadChatImage(ctx, lease, value, 20<<20)
-	if err != nil {
-		return "", err
-	}
-	uploaded, err := a.uploadFileV2Direct(ctx, cfg, lease, token, image, cfg.BaseURL+"/imagine", imagineSelfUploadSource, "video_reference_upload")
-	if err != nil {
-		return "", err
-	}
-	if uploaded.URI == "" {
-		return "", fmt.Errorf("上传视频参考图片后未返回 fileUri")
-	}
-	return uploaded.URI, nil
 }
 
 // DownloadVideo retrieves a completed Grok asset through its source SSO
@@ -503,15 +518,52 @@ func videoSegments(seconds int) []int {
 	return []int{seconds}
 }
 
-func videoCreatePayload(prompt, parentID, ratio, resolution string, seconds int, references []string) map[string]any {
-	config := map[string]any{"parentPostId": parentID, "aspectRatio": ratio, "videoLength": seconds, "resolutionName": resolution}
-	if len(references) > 0 {
-		config["isVideoEdit"] = false
-		config["isReferenceToVideo"] = true
-		config["imageReferences"] = references
+func normalizeFreeVideoDurationCap(value int) int {
+	return settingsdomain.NormalizeWebFreeVideoDurationCap(value)
+}
+
+func shouldCapWebVideoDuration(credential account.Credential) bool {
+	return credential.WebTier == account.WebTierBasic
+}
+
+// applyFreeWebVideoDurationCap clamps duration for free-tier Web accounts so
+// upstream 429s from >6s (or the configured cap) do not trigger useless account rotation.
+func applyFreeWebVideoDurationCap(seconds, cap int, credential account.Credential) int {
+	if !shouldCapWebVideoDuration(credential) {
+		return seconds
 	}
+	cap = normalizeFreeVideoDurationCap(cap)
+	if seconds > cap {
+		return cap
+	}
+	return seconds
+}
+
+// videoCreatePayload mirrors the current Grok Imagine browser request.
+// In particular, the generation parameters belong in mediaGenInput rather
+// than the legacy modelConfigOverride map. Keeping this shape explicit also
+// prevents text-to-video from depending on a synthetic media post.
+func videoCreatePayload(prompt, ratio, resolution string, seconds int) map[string]any {
 	return map[string]any{
-		"temporary": true, "modelName": "imagine-video-gen", "message": prompt + " --mode=custom", "enableSideBySide": true,
-		"responseMetadata": map[string]any{"experiments": []any{}, "modelConfigOverride": map[string]any{"modelMap": map[string]any{"videoGenModelConfig": config}}},
+		"modelName":            "imagine-video-gen",
+		"message":              prompt + " --mode=custom",
+		"enableImageStreaming": true,
+		"enableSideBySide":     true,
+		"sendFinalMetadata":    true,
+		"responseMetadata": map[string]any{
+			"experiments": []any{},
+			"modelConfigOverride": map[string]any{
+				"modelMap": map[string]any{},
+			},
+		},
+		"mediaGenInput": map[string]any{
+			"textToVideo": map[string]any{
+				"prompt":         prompt,
+				"aspectRatio":    ratio,
+				"duration":       seconds,
+				"resolutionName": resolution,
+			},
+		},
+		"kind": "CONVERSATION_KIND_IMAGINE",
 	}
 }

@@ -24,10 +24,13 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
 	settingsdomain "github.com/chenyme/grok2api/backend/internal/domain/settings"
+	"github.com/chenyme/grok2api/backend/internal/infra/buildtransport"
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/conversation"
+	providerstreamidle "github.com/chenyme/grok2api/backend/internal/infra/provider/streamidle"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	neterrorpkg "github.com/chenyme/grok2api/backend/internal/pkg/neterror"
 	"github.com/chenyme/grok2api/backend/internal/pkg/reasoningreplay"
 )
 
@@ -39,11 +42,14 @@ type Config struct {
 	TokenAuth             string
 	UserAgent             string
 	ResponseHeaderTimeout time.Duration
+	StreamIdleTimeout     time.Duration
 }
 
 const (
 	subscriptionTierTimeout = 10 * time.Second
 	buildControlTimeout     = 30 * time.Second
+	buildGrok45Model        = "grok-4.5"
+	buildGrok46Model        = "grok-4.6"
 )
 
 // Adapter implements the Grok Build CLI Responses, model, Billing, and OAuth protocols.
@@ -60,12 +66,18 @@ type Adapter struct {
 	fallbackMarker FallbackMarker
 	uploadIssuer   VideoUploadIssuer
 	replay         *reasoningreplay.ReasoningReplay
-	compaction     *gatewayCompactionCodec
-	logger         *slog.Logger
+	// conversationReasoningCache bridges Chat/Messages tool calls to the
+	// upstream Responses reasoning proof. It is deliberately separate from
+	// the persistent native Responses replay, and its keys never contain an
+	// account ID: encrypted reasoning is portable across Build accounts.
+	conversationReasoningCache *conversation.ReasoningCache
+	compaction                 *gatewayCompactionCodec
+	logger                     *slog.Logger
 }
 
 func NewAdapter(cfg Config, cipher *security.Cipher) *Adapter {
 	cfg.ResponseHeaderTimeout = normalizeBuildResponseHeaderTimeout(cfg.ResponseHeaderTimeout)
+	cfg.StreamIdleTimeout = normalizeBuildStreamIdleTimeout(cfg.StreamIdleTimeout)
 	transport := newBuildDirectTransport(cfg.ResponseHeaderTimeout)
 	httpClient := &http.Client{Transport: transport}
 	// The official CLI uses a persistent machine identity. The gateway does not collect machine fingerprints;
@@ -73,7 +85,9 @@ func NewAdapter(cfg Config, cipher *security.Cipher) *Adapter {
 	agentID := uuid.NewString()
 	adapter := &Adapter{
 		cfg: cfg, http: httpClient, cipher: cipher, base: transport,
-		agentID: agentID, modelsETags: make(map[uint64]string), compaction: newGatewayCompactionCodec(cipher), logger: slog.Default(),
+		agentID: agentID, modelsETags: make(map[uint64]string),
+		conversationReasoningCache: conversation.NewReasoningCache(0, 0),
+		compaction:                 newGatewayCompactionCodec(cipher), logger: slog.Default(),
 	}
 	adapter.oauth = newOAuthClient(httpClient, func() string { return adapter.config().ClientVersion })
 	return adapter
@@ -154,6 +168,7 @@ func buildBotFlaggedFromClaims(claims map[string]any) bool {
 
 func (a *Adapter) UpdateConfig(cfg Config) {
 	cfg.ResponseHeaderTimeout = normalizeBuildResponseHeaderTimeout(cfg.ResponseHeaderTimeout)
+	cfg.StreamIdleTimeout = normalizeBuildStreamIdleTimeout(cfg.StreamIdleTimeout)
 	a.cfgMu.Lock()
 	previousTimeout := a.cfg.ResponseHeaderTimeout
 	a.cfg = cfg
@@ -186,18 +201,29 @@ func (t *buildDirectTransport) UpdateResponseHeaderTimeout(responseHeaderTimeout
 }
 
 func newBuildHTTPTransport(responseHeaderTimeout time.Duration) *http.Transport {
-	return &http.Transport{
+	transport := &http.Transport{
 		Proxy: http.ProxyFromEnvironment, ForceAttemptHTTP2: true,
 		MaxIdleConns: 256, MaxIdleConnsPerHost: 128, MaxConnsPerHost: 256,
-		IdleConnTimeout: 90 * time.Second, TLSHandshakeTimeout: 10 * time.Second,
+		IdleConnTimeout: buildtransport.IdleConnTimeout, TLSHandshakeTimeout: 10 * time.Second,
 		ResponseHeaderTimeout: normalizeBuildResponseHeaderTimeout(responseHeaderTimeout),
 		ExpectContinueTimeout: time.Second,
 	}
+	if _, err := buildtransport.ConfigureHTTP2Health(transport); err != nil {
+		slog.Warn("build_http2_health_config_failed", "error", err)
+	}
+	return transport
 }
 
 func normalizeBuildResponseHeaderTimeout(value time.Duration) time.Duration {
 	if value <= 0 {
 		return settingsdomain.DefaultBuildResponseHeaderTimeout
+	}
+	return value
+}
+
+func normalizeBuildStreamIdleTimeout(value time.Duration) time.Duration {
+	if value <= 0 {
+		return settingsdomain.DefaultBuildStreamIdleTimeout
 	}
 	return value
 }
@@ -209,6 +235,9 @@ func (a *Adapter) config() Config {
 }
 
 func (a *Adapter) ForwardResponse(ctx context.Context, request provider.ResponseResourceRequest) (*provider.Response, error) {
+	if request.NormalizedMetadata != nil {
+		*request.NormalizedMetadata = provider.NormalizedRequestMetadata{}
+	}
 	accessToken, err := a.cipher.Decrypt(request.Credential.EncryptedAccessToken)
 	if err != nil {
 		return nil, err
@@ -218,20 +247,30 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 	var conversationOptions conversation.ResponseOptions
 	cacheRoute := buildPromptCacheRoute{}
 	compactionRequested := false
+	// Resolve the physical inference plane before normalization so Chat and
+	// Anthropic conversion can use the same scope for capture and restoration.
+	// The scope contains the trusted session seed, model, and plane only; it is
+	// intentionally independent of the selected account.
+	primaryBase := a.primaryBaseURL()
+	base := a.inferenceBaseForOperation(request.Credential, request.Billing, request.Method, request.Path)
+	conversationScope := a.conversationReasoningScope(request, base)
 	if request.NormalizeBody {
 		if request.Operation == conversation.OperationChat || request.Operation == conversation.OperationMessages {
-			body, conversationOptions, err = conversation.ConvertRequestWithOptions(body, request.Model, request.Operation)
+			body, conversationOptions, err = conversation.ConvertRequestWithReasoningReplay(body, request.Model, request.Operation, a.conversationReasoningCache, conversationScope)
+			if err == nil && conversationOptions.ReasoningEffortSet && request.NormalizedMetadata != nil {
+				request.NormalizedMetadata.ReasoningEffort = conversationOptions.ReasoningEffort
+			}
 		} else {
-			var foreignCompactions int
-			body, foreignCompactions, err = expandGatewayCompactionHistory(body, a.compaction, request.PromptCacheKey)
+			var driftedCompactions int
+			body, driftedCompactions, err = expandGatewayCompactionHistory(body, a.compaction, request.PromptCacheKey)
 			if err != nil {
 				return invalidResponsesResponse(err), nil
 			}
-			body, toolCompatibility, err = normalizeResponsesRequest(body, request.Model)
+			body, toolCompatibility, err = normalizeResponsesRequestWithMetadata(body, request.Model, request.NormalizedMetadata)
 			if toolCompatibility != nil {
 				compactionRequested = toolCompatibility.compactionRequested
-				if foreignCompactions > 0 {
-					toolCompatibility.addWarning("foreign_compaction_omitted")
+				if driftedCompactions > 0 {
+					toolCompatibility.addWarning("compaction_session_drifted")
 				}
 			}
 		}
@@ -241,7 +280,7 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 			}
 			return invalidResponsesResponse(err), nil
 		}
-		body, err = normalizeBuildRequest(body, request.Model)
+		body, err = normalizeBuildRequestWithMetadata(body, request.Model, request.Operation, request.NormalizedMetadata)
 		if err != nil {
 			if request.Operation == conversation.OperationChat || request.Operation == conversation.OperationMessages {
 				return invalidConversationResponse(request.Operation, err), nil
@@ -251,6 +290,8 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 	}
 	if request.Operation == conversation.OperationMessages && conversationOptions.AnthropicWebSearch {
 		request.ReasoningReplayKey = ""
+		conversationScope = ""
+		conversationOptions = conversationOptions.WithReasoningReplay(nil, "")
 	}
 	if compactionRequested {
 		body, err = prepareGatewayCompactionSample(body)
@@ -287,23 +328,29 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 		return a.forwardGatewayCompaction(ctx, request, accessToken, body, warnings)
 	}
 	// Explicit mode wins; in auto mode only confirmed Super accounts with bot_flag_source/bfs in {1,2} default to XAI.
-	primaryBase := a.primaryBaseURL()
-	base := a.inferenceBaseForOperation(request.Credential, request.Billing, request.Method, request.Path)
-	// Cache affinity and reasoning replay use separate identities. Replay is also bound to the actual account and upstream plane,
-	// preventing opaque reasoning issued for one account or Build plane from reaching another scope.
+	// Prompt-cache affinity and reasoning replay use separate identities. The
+	// native Responses replay remains account-scoped, while the Chat/Messages
+	// bridge is scoped to the client session, model, and physical plane only;
+	// encrypted reasoning is portable across accounts on that plane.
 	replayBaseBody := body
 	body, replayKey := a.applyReasoningReplay(ctx, request, replayBaseBody, base)
-	resp, reqURL, err := a.doResponseRequest(ctx, request, accessToken, body, base)
-	if err != nil {
+	call := a.doResponseRequest(ctx, request, accessToken, body, base)
+	if call.err != nil {
+		return nil, call.err
+	}
+	if err := normalizeGzipResponse(call.response); err != nil {
 		return nil, err
 	}
-	if err := normalizeGzipResponse(resp); err != nil {
-		return nil, err
+	call, reasoningRecovery, recoveryErr := a.recoverReasoningDecodeFailure(ctx, request, accessToken, body, base, replayKey, call)
+	if recoveryErr != nil {
+		return nil, recoveryErr
 	}
-	resp, reqURL, reasoningRecovery := a.recoverReasoningDecodeFailure(ctx, request, accessToken, body, base, replayKey, resp, reqURL)
+	resp, reqURL := call.response, call.upstreamURL
 	var recoveredPrimaryFailure *provider.DiagnosticResponse
+	var recoveredPrimaryAttempt *provider.RecoveredAttempt
 	// Only eligible operations probe XAI with an equivalent request after the Build primary explicitly returns 403.
 	if strings.EqualFold(base, primaryBase) && shouldProbeXAIInferenceFallback(request.Credential, request.Billing, request.Method, request.Path, resp.StatusCode) {
+		primaryCall := call
 		// Buffer the primary 403 body and replay it unchanged if fallback fails; never issue a second primary POST.
 		primaryBody, primaryTruncated, readErr := provider.ReadDiagnosticBody(resp.Body)
 		_ = resp.Body.Close()
@@ -318,22 +365,33 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 			if fallbackBase != "" && !strings.EqualFold(fallbackBase, base) {
 				fallbackBody, fallbackReplayKey := a.applyReasoningReplay(ctx, request, replayBaseBody, fallbackBase)
 				fallbackCtx := infraegress.WithPhysicalCallStage(ctx, "plane_fallback")
-				fallbackResp, fallbackURL, fallbackErr := a.doResponseRequest(fallbackCtx, request, accessToken, fallbackBody, fallbackBase)
+				fallbackCall := a.doResponseRequest(fallbackCtx, request, accessToken, fallbackBody, fallbackBase)
+				fallbackErr := fallbackCall.err
 				if fallbackErr == nil {
-					fallbackErr = normalizeGzipResponse(fallbackResp)
+					fallbackErr = normalizeGzipResponse(fallbackCall.response)
 				}
 				fallbackRecovery := reasoningRecoveryOutcome{}
 				if fallbackErr == nil {
-					fallbackResp, fallbackURL, fallbackRecovery = a.recoverReasoningDecodeFailure(ctx, request, accessToken, fallbackBody, fallbackBase, fallbackReplayKey, fallbackResp, fallbackURL)
+					fallbackCall, fallbackRecovery, fallbackErr = a.recoverReasoningDecodeFailure(ctx, request, accessToken, fallbackBody, fallbackBase, fallbackReplayKey, fallbackCall)
 				}
-				if fallbackErr == nil && isHTTPSuccess(fallbackResp.StatusCode) {
+				if fallbackErr == nil && isHTTPSuccess(fallbackCall.response.StatusCode) {
 					recoveredPrimaryFailure = bufferedFailureDiagnostic(primaryResp, primaryBody, primaryTruncated)
+					recoveredPrimaryAttempt = &provider.RecoveredAttempt{
+						Stage:       "primary_plane_response",
+						Result:      "replaced_by_plane_fallback",
+						UpstreamURL: primaryCall.upstreamURL,
+						StartedAt:   primaryCall.startedAt,
+						DurationMS:  primaryCall.durationMS,
+						Diagnostic:  *recoveredPrimaryFailure,
+					}
 					a.activateBuildAPIFallback(ctx, &request.Credential)
-					resp, reqURL, base, body, replayKey = fallbackResp, fallbackURL, fallbackBase, fallbackBody, fallbackReplayKey
+					call = fallbackCall
+					resp, reqURL, base, body, replayKey = call.response, call.upstreamURL, fallbackBase, fallbackBody, fallbackReplayKey
+					conversationOptions = conversationOptions.WithReasoningReplay(a.conversationReasoningCache, a.conversationReasoningScope(request, base))
 					reasoningRecovery = reasoningRecovery.merge(fallbackRecovery)
 				} else {
-					if fallbackErr == nil {
-						_ = fallbackResp.Body.Close()
+					if fallbackErr == nil && fallbackCall.response != nil {
+						_ = fallbackCall.response.Body.Close()
 					}
 					// Preserve the original primary 403 URL and buffered body without requesting the primary again.
 					resp = primaryResp
@@ -361,6 +419,9 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 				Body: append([]byte(nil), body...), BodyTruncated: true,
 			}
 		}
+	}
+	if request.Streaming && isHTTPSuccess(resp.StatusCode) && resp.Body != nil {
+		resp.Body = wrapBuildSemanticIdle(resp.Body, a.config().StreamIdleTimeout)
 	}
 	modelCatalogChanged := a.modelCatalogChanged(request.Credential.ID, resp.Header.Get("x-models-etag"))
 	// Capture or clear reasoning replay in the upstream Responses shape before protocol conversion.
@@ -392,6 +453,9 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 			if readErr != nil {
 				return nil, readErr
 			}
+			if len(bytes.TrimSpace(data)) == 0 {
+				return nil, neterrorpkg.ErrUpstreamResponseEmpty
+			}
 			if len(data) > maxCompatibleResponseBytes {
 				return nil, fmt.Errorf("上游兼容 Responses 响应超过 128 MiB")
 			}
@@ -422,6 +486,9 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 			if readErr != nil {
 				return nil, readErr
 			}
+			if resp.StatusCode >= 200 && resp.StatusCode < 300 && len(bytes.TrimSpace(data)) == 0 {
+				return nil, neterrorpkg.ErrUpstreamResponseEmpty
+			}
 			if resp.StatusCode >= 200 && resp.StatusCode < 300 && len(data) > 64<<20 {
 				return nil, fmt.Errorf("上游对话响应超过 64 MiB")
 			}
@@ -434,15 +501,24 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 				if diagnostic == nil {
 					return nil, convertErr
 				}
-				return &provider.Response{StatusCode: resp.StatusCode, Status: resp.Status, Header: diagnostic.Header.Clone(), Body: io.NopCloser(bytes.NewReader(data)), UpstreamURL: reqURL, Diagnostic: diagnostic, RecoveredPrimaryFailure: recoveredPrimaryFailure, RateLimit: rateLimit, ModelCatalogChanged: modelCatalogChanged}, nil
+				return &provider.Response{StatusCode: resp.StatusCode, Status: resp.Status, Header: diagnostic.Header.Clone(), Body: io.NopCloser(bytes.NewReader(data)), UpstreamURL: reqURL, Diagnostic: diagnostic, ReasoningRecoveryFailed: reasoningRecovery.failed, RecoveredPrimaryFailure: recoveredPrimaryFailure, RecoveredAttempts: recoveredAttempts(recoveredPrimaryAttempt, reasoningRecovery), RateLimit: rateLimit, ModelCatalogChanged: modelCatalogChanged}, nil
 			}
 			resp.Body = io.NopCloser(bytes.NewReader(converted))
 			resp.Header.Set("Content-Length", strconv.Itoa(len(converted)))
 			resp.Header.Set("Content-Type", "application/json")
-			return &provider.Response{StatusCode: resp.StatusCode, Status: resp.Status, Header: resp.Header.Clone(), Body: resp.Body, UpstreamURL: reqURL, Diagnostic: diagnostic, RecoveredPrimaryFailure: recoveredPrimaryFailure, RateLimit: rateLimit, ModelCatalogChanged: modelCatalogChanged}, nil
+			return &provider.Response{StatusCode: resp.StatusCode, Status: resp.Status, Header: resp.Header.Clone(), Body: resp.Body, UpstreamURL: reqURL, Diagnostic: diagnostic, ReasoningRecoveryFailed: reasoningRecovery.failed, RecoveredPrimaryFailure: recoveredPrimaryFailure, RecoveredAttempts: recoveredAttempts(recoveredPrimaryAttempt, reasoningRecovery), RateLimit: rateLimit, ModelCatalogChanged: modelCatalogChanged}, nil
 		}
 	}
-	return &provider.Response{StatusCode: resp.StatusCode, Status: resp.Status, Header: resp.Header.Clone(), Body: resp.Body, UpstreamURL: reqURL, Diagnostic: rateLimitDiagnostic, RecoveredPrimaryFailure: recoveredPrimaryFailure, RateLimit: rateLimit, ModelCatalogChanged: modelCatalogChanged}, nil
+	return &provider.Response{StatusCode: resp.StatusCode, Status: resp.Status, Header: resp.Header.Clone(), Body: resp.Body, UpstreamURL: reqURL, Diagnostic: rateLimitDiagnostic, ReasoningRecoveryFailed: reasoningRecovery.failed, RecoveredPrimaryFailure: recoveredPrimaryFailure, RecoveredAttempts: recoveredAttempts(recoveredPrimaryAttempt, reasoningRecovery), RateLimit: rateLimit, ModelCatalogChanged: modelCatalogChanged}, nil
+}
+
+// recoveredAttempts 按真实调用顺序汇总被 fallback 与 reasoning recovery 隐藏的失败。
+func recoveredAttempts(primary *provider.RecoveredAttempt, recovery reasoningRecoveryOutcome) []provider.RecoveredAttempt {
+	attempts := append([]provider.RecoveredAttempt(nil), recovery.attempts...)
+	if primary != nil {
+		attempts = append([]provider.RecoveredAttempt{*primary}, attempts...)
+	}
+	return attempts
 }
 
 func (a *Adapter) shouldCaptureReplay(request provider.ResponseResourceRequest, resp *http.Response, replayKey string) bool {
@@ -475,14 +551,28 @@ func (a *Adapter) applyReasoningReplay(ctx context.Context, request provider.Res
 
 func (a *Adapter) scopedReasoningReplayKey(request provider.ResponseResourceRequest, base string) string {
 	seed := strings.TrimSpace(request.ReasoningReplayKey)
-	if seed == "" || request.Credential.ID == 0 {
+	if seed == "" {
 		return ""
 	}
 	plane := "build"
 	if fallback := a.fallbackBaseURL(); fallback != "" && strings.EqualFold(strings.TrimRight(base, "/"), fallback) {
 		plane = "xai"
 	}
-	digest := sha256.Sum256([]byte(fmt.Sprintf("grok2api:reasoning-replay:v2:%s:%d:%s", seed, request.Credential.ID, plane)))
+	digest := sha256.Sum256([]byte(fmt.Sprintf("grok2api:reasoning-replay:v3:%s:%s", seed, plane)))
+	return hex.EncodeToString(digest[:])
+}
+
+func (a *Adapter) conversationReasoningScope(request provider.ResponseResourceRequest, base string) string {
+	seed := strings.TrimSpace(request.ReasoningReplayKey)
+	model := strings.ToLower(strings.TrimSpace(request.Model))
+	if seed == "" || model == "" {
+		return ""
+	}
+	plane := "build"
+	if fallback := a.fallbackBaseURL(); fallback != "" && strings.EqualFold(strings.TrimRight(base, "/"), fallback) {
+		plane = "xai"
+	}
+	digest := sha256.Sum256([]byte(fmt.Sprintf("grok2api:conversation-reasoning:v1:%s:%s:%s", seed, model, plane)))
 	return hex.EncodeToString(digest[:])
 }
 
@@ -490,7 +580,21 @@ func isCompactPath(path string) bool {
 	return strings.Contains(strings.ToLower(path), "compact")
 }
 
-func (a *Adapter) doResponseRequest(ctx context.Context, request provider.ResponseResourceRequest, accessToken string, body []byte, base string) (*http.Response, string, error) {
+type responseCall struct {
+	response    *http.Response
+	upstreamURL string
+	startedAt   time.Time
+	durationMS  int64
+	err         error
+}
+
+// doResponseRequest 发起一次真实 Responses 上游调用，并保留该次调用自己的审计来源信息。
+func (a *Adapter) doResponseRequest(ctx context.Context, request provider.ResponseResourceRequest, accessToken string, body []byte, base string) (call responseCall) {
+	startedAt := time.Now()
+	call = responseCall{upstreamURL: a.urlWithBase(base, request.Path), startedAt: startedAt.UTC()}
+	defer func() {
+		call.durationMS = time.Since(startedAt).Milliseconds()
+	}()
 	var bodyReader io.Reader
 	if len(body) > 0 {
 		bodyReader = bytes.NewReader(body)
@@ -504,12 +608,15 @@ func (a *Adapter) doResponseRequest(ctx context.Context, request provider.Respon
 		plane = "xai"
 	}
 	requestCtx = infraegress.WithPhysicalCallPlane(requestCtx, plane)
-	req, err := http.NewRequestWithContext(requestCtx, request.Method, a.urlWithBase(base, request.Path), bodyReader)
+	req, err := http.NewRequestWithContext(requestCtx, request.Method, call.upstreamURL, bodyReader)
 	if err != nil {
-		return nil, "", err
+		call.err = err
+		return call
 	}
+	call.upstreamURL = req.URL.String()
 	if err := a.applyHeaders(req, request.Credential, accessToken, request.Model, request.PromptCacheKey, true); err != nil {
-		return nil, "", err
+		call.err = err
+		return call
 	}
 	applyGrokTurnIndexHeader(req, request.GrokTurnIndex)
 	if len(body) > 0 {
@@ -524,11 +631,38 @@ func (a *Adapter) doResponseRequest(ctx context.Context, request provider.Respon
 	if request.IdempotencyID != "" {
 		req.Header.Set("Idempotency-Key", request.IdempotencyID)
 	}
+	// Streaming requests already receive transport/semantic idle protection.
+	// Non-streaming text inference needs its own cancel-cause-aware body timer:
+	// ResponseHeaderTimeout stops once headers arrive and cannot interrupt a
+	// server that then leaves the JSON body silent indefinitely. Create the
+	// derived context only after every fallible request-construction step so
+	// every remaining path either cancels it or transfers ownership to the body.
+	var responseIdleCancel context.CancelCauseFunc
+	responseIdle := a.config().StreamIdleTimeout
+	if !request.Streaming && responseIdle > 0 {
+		requestCtx, responseIdleCancel = context.WithCancelCause(requestCtx)
+		req = req.WithContext(requestCtx)
+	}
 	resp, err := a.http.Do(req)
 	if err != nil {
-		return nil, "", err
+		if responseIdleCancel != nil {
+			responseIdleCancel(nil)
+		}
+		call.err = err
+		return call
 	}
-	return resp, req.URL.String(), nil
+	if responseIdleCancel != nil {
+		switch {
+		case resp.Body == nil:
+			responseIdleCancel(nil)
+		case isHTTPSuccess(resp.StatusCode):
+			resp.Body = providerstreamidle.New(resp.Body, responseIdle, responseIdleCancel)
+		default:
+			resp.Body = &cancelOnCloseReadCloser{ReadCloser: resp.Body, cancel: responseIdleCancel}
+		}
+	}
+	call.response = resp
+	return call
 }
 
 // applyGrokTurnIndexHeader forwards a real client turn only when the request has a stable Grok session.
@@ -618,15 +752,17 @@ func (a *Adapter) ListModels(ctx context.Context, credential account.Credential)
 
 // NormalizeAccountModelCapabilities normalizes capabilities that the OAuth
 // session contract exposes independently of the account's sparse /models list.
-// Composer is available to Build OAuth sessions even though the live catalog can
-// return only grok-4.5. Super always includes video 1.5; Free and Unknown remove
-// video 1.5 exactly. BuildAPIFallback is ignored.
+// Composer is available to Build OAuth sessions independently of the sparse
+// live catalog. Grok 4.6 sessions retain the still-supported Grok 4.5 route for
+// backwards compatibility. Super always includes video 1.5; Free and Unknown
+// remove video 1.5 exactly. BuildAPIFallback is ignored.
 func (a *Adapter) NormalizeAccountModelCapabilities(models []string, billing *account.Billing, credential account.Credential) []string {
 	super := account.IsBuildSuper(credential, billing)
 	composer := credential.Provider == account.ProviderBuild && credential.AuthType == account.AuthTypeOAuth
 	result := make([]string, 0, len(models)+2)
 	seen := make(map[string]struct{}, len(models)+2)
 	hasVideo15 := false
+	hasGrok46 := false
 	for _, model := range models {
 		model = strings.TrimSpace(model)
 		if model == "" {
@@ -641,8 +777,17 @@ func (a *Adapter) NormalizeAccountModelCapabilities(models []string, billing *ac
 			}
 			hasVideo15 = true
 		}
+		if model == buildGrok46Model {
+			hasGrok46 = true
+		}
 		seen[model] = struct{}{}
 		result = append(result, model)
+	}
+	if credential.Provider == account.ProviderBuild && hasGrok46 {
+		if _, exists := seen[buildGrok45Model]; !exists {
+			seen[buildGrok45Model] = struct{}{}
+			result = append(result, buildGrok45Model)
+		}
 	}
 	if super && !hasVideo15 {
 		result = append(result, buildVideoModel)
@@ -798,7 +943,7 @@ func (a *Adapter) RefreshCredential(ctx context.Context, credential account.Cred
 		return provider.RefreshedCredential{}, &provider.CredentialRefreshError{Code: "missing_refresh_token", Message: "Refresh token is missing", Permanent: true}
 	}
 	refreshCtx := infraegress.WithCredential(ctx, credential)
-	tokens, err := a.oauth.refresh(refreshCtx, refreshToken)
+	tokens, err := a.oauth.refreshWithClientID(refreshCtx, refreshToken, credential.OIDCClientID)
 	if err != nil {
 		return provider.RefreshedCredential{}, err
 	}
@@ -810,7 +955,7 @@ func (a *Adapter) RefreshCredential(ctx context.Context, credential account.Cred
 	if err != nil {
 		return provider.RefreshedCredential{}, err
 	}
-	return provider.RefreshedCredential{EncryptedAccessToken: accessEncrypted, EncryptedRefreshToken: refreshEncrypted, ExpiresAt: tokens.ExpiresAt}, nil
+	return provider.RefreshedCredential{EncryptedAccessToken: accessEncrypted, EncryptedRefreshToken: refreshEncrypted, ExpiresAt: tokens.ExpiresAt, RefreshTokenRotated: tokens.RefreshTokenRotated}, nil
 }
 
 func (a *Adapter) StartDeviceAuthorization(ctx context.Context) (provider.DeviceAuthorization, error) {
@@ -834,6 +979,34 @@ func (a *Adapter) PollDeviceAuthorization(ctx context.Context, deviceCode string
 
 func (a *Adapter) ParseImportedCredentials(data []byte) ([]provider.CredentialSeed, error) {
 	return parseImportedCredentials(data)
+}
+
+// PrepareImportedCredential validates a refresh-token-only import and keeps
+// the rotated tokens returned by xAI before the account is persisted.
+func (a *Adapter) PrepareImportedCredential(ctx context.Context, seed provider.CredentialSeed) (provider.CredentialSeed, error) {
+	if strings.TrimSpace(seed.AccessToken) != "" || strings.TrimSpace(seed.RefreshToken) == "" {
+		return seed, nil
+	}
+	refreshCtx, cancel := context.WithTimeout(ctx, buildControlTimeout)
+	defer cancel()
+	tokens, err := a.oauth.refreshWithClientID(refreshCtx, strings.TrimSpace(seed.RefreshToken), seed.OIDCClientID)
+	if err != nil {
+		return provider.CredentialSeed{}, fmt.Errorf("验证 Grok Build refresh token: %w", err)
+	}
+	claims := decodeJWTClaims(firstNonEmpty(tokens.IDToken, tokens.AccessToken))
+	seed.AccessToken = tokens.AccessToken
+	seed.RefreshToken = tokens.RefreshToken
+	seed.ExpiresAt = tokens.ExpiresAt
+	seed.OIDCClientID = firstNonEmpty(seed.OIDCClientID, defaultOAuthClientID)
+	seed.UserID = firstNonEmpty(seed.UserID, stringClaim(claims, "sub"))
+	seed.Email = firstNonEmpty(seed.Email, stringClaim(claims, "email"))
+	seed.TeamID = firstNonEmpty(seed.TeamID, stringClaim(claims, "team_id"))
+	if seed.Name == "" || seed.Name == "Grok Build account" {
+		seed.Name = firstNonEmpty(seed.Email, seed.UserID, "Grok Build account")
+	}
+	identity := firstNonEmpty(seed.UserID, strings.ToLower(seed.Email), seed.TeamID, seed.RefreshToken, seed.AccessToken)
+	seed.SourceKey = "import:" + security.HashToken(strings.Join([]string{credentialImportProvider, seed.OIDCClientID, identity}, "|"))
+	return seed, nil
 }
 
 func (a *Adapter) MarshalCredentials(values []provider.CredentialSeed) ([]byte, error) {

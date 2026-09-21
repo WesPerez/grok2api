@@ -32,9 +32,12 @@ type layeredAccountRepository struct {
 	overlayErr     error
 	combined       []account.RoutingCandidate
 	combinedCalls  int
+	materialHook   func(context.Context, uint64) error
 	materialErrors map[uint64]error
 	materials      map[uint64]account.CredentialMaterial
 	materialCalls  []uint64
+	healthUpdates  []repository.InvalidationEvent
+	lastUsedAt     map[uint64]time.Time
 }
 
 type temporaryRoutingLoadError struct{ message string }
@@ -81,17 +84,58 @@ func (r *layeredAccountRepository) ListRoutingCandidates(context.Context, accoun
 	return r.combined, nil
 }
 
-func (r *layeredAccountRepository) GetCredentialMaterial(_ context.Context, accountID uint64, provider account.Provider) (account.CredentialMaterial, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.materialCalls = append(r.materialCalls, accountID)
-	if err := r.materialErrors[accountID]; err != nil {
+func (r *layeredAccountRepository) GetCredentialMaterial(ctx context.Context, accountID uint64, provider account.Provider) (account.CredentialMaterial, error) {
+	if err := ctx.Err(); err != nil {
 		return account.CredentialMaterial{}, err
 	}
-	if material, ok := r.materials[accountID]; ok {
+	r.mu.Lock()
+	r.materialCalls = append(r.materialCalls, accountID)
+	hook := r.materialHook
+	loadErr := r.materialErrors[accountID]
+	material, materialExists := r.materials[accountID]
+	r.mu.Unlock()
+	if hook != nil {
+		if err := hook(ctx, accountID); err != nil {
+			return account.CredentialMaterial{}, err
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return account.CredentialMaterial{}, err
+	}
+	if loadErr != nil {
+		return account.CredentialMaterial{}, loadErr
+	}
+	if materialExists {
 		return material, nil
 	}
 	return account.CredentialMaterial{AccountID: accountID, Provider: provider, AuthType: account.AuthTypeOAuth, EncryptedAccessToken: "encrypted"}, nil
+}
+
+func (r *layeredAccountRepository) UpdateHealth(_ context.Context, id uint64, _ account.Provider, failureCount int, cooldownUntil *time.Time, lastError string, _ bool) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	provider := account.ProviderBuild
+	for _, base := range r.bases {
+		if base.Credential.ID == id {
+			provider = base.Credential.Provider
+			break
+		}
+	}
+	r.healthUpdates = append(r.healthUpdates, repository.InvalidationEvent{
+		Kind: repository.InvalidationAccountHealthChanged, Provider: provider, AccountID: id,
+		FailureCount: failureCount, CooldownUntil: cooldownUntil, HealthMarker: account.NormalizeHealthMarker(lastError),
+	})
+	return nil
+}
+
+func (r *layeredAccountRepository) TouchLastUsed(_ context.Context, id uint64, usedAt time.Time) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.lastUsedAt == nil {
+		r.lastUsedAt = make(map[uint64]time.Time)
+	}
+	r.lastUsedAt[id] = usedAt
+	return nil
 }
 
 func (r *layeredAccountRepository) ListRoutingAccountOverlays(_ context.Context, _ account.Provider, modelRouteID uint64, upstreamModel string) (account.RoutingOverlaySnapshot, error) {
@@ -148,6 +192,80 @@ func TestSelectorLayeredCacheReusesBaseAcrossModels(t *testing.T) {
 	baseCalls, modelACalls = repo.callCounts("model-a")
 	if baseCalls != 2 || modelACalls != 2 {
 		t.Fatalf("overlay invalidation reloaded base=%d overlay=%d", baseCalls, modelACalls)
+	}
+}
+
+func TestSelectorHealthInvalidationDoesNotRebuildProviderSnapshots(t *testing.T) {
+	repo := newLayeredRepositoryFixture()
+	selector := NewSelector(repo, nil, nil, nil, time.Hour, time.Second, time.Minute)
+	now := time.Now().UTC()
+	if _, err := selector.beginSelectionSession(context.Background(), account.ProviderBuild, 0, "model-a", "", "", nil, false); err != nil {
+		t.Fatal(err)
+	}
+	baseCalls, overlayCalls := repo.callCounts("model-a")
+
+	cooldownUntil := now.Add(time.Minute)
+	selector.ApplyInvalidation(repository.InvalidationEvent{
+		Kind: repository.InvalidationAccountHealthChanged, Provider: account.ProviderBuild, AccountID: 1,
+		FailureCount: 1, CooldownUntil: &cooldownUntil, HealthMarker: account.LastErrorMissingThinking, PublishedAt: now,
+	})
+	marked := selector.applyRoutingHealth(account.Credential{ID: 1, Provider: account.ProviderBuild}, now)
+	if marked.LastError != account.LastErrorMissingThinking {
+		t.Fatalf("durable health marker was lost in the runtime overlay: %#v", marked)
+	}
+	_, err := selector.beginSelectionSession(context.Background(), account.ProviderBuild, 0, "model-a", "", "", nil, false)
+	var unavailable *SelectionUnavailableError
+	if !errors.As(err, &unavailable) || unavailable.Reason != SelectionCooling {
+		t.Fatalf("selection error = %v, want cooling", err)
+	}
+	if currentBase, currentOverlay := repo.callCounts("model-a"); currentBase != baseCalls || currentOverlay != overlayCalls {
+		t.Fatalf("health update rebuilt snapshots: base %d->%d overlay %d->%d", baseCalls, currentBase, overlayCalls, currentOverlay)
+	}
+
+	selector.ApplyInvalidation(repository.InvalidationEvent{
+		Kind: repository.InvalidationAccountHealthChanged, Provider: account.ProviderBuild, AccountID: 1, PublishedAt: time.Now().UTC(),
+	})
+	if _, err := selector.beginSelectionSession(context.Background(), account.ProviderBuild, 0, "model-a", "", "", nil, false); err != nil {
+		t.Fatalf("cleared health override did not restore account: %v", err)
+	}
+	if currentBase, currentOverlay := repo.callCounts("model-a"); currentBase != baseCalls || currentOverlay != overlayCalls {
+		t.Fatalf("health recovery rebuilt snapshots: base %d->%d overlay %d->%d", baseCalls, currentBase, overlayCalls, currentOverlay)
+	}
+
+	selector.MarkFailure(context.Background(), repo.bases[0].Credential, 500, 0)
+	_, err = selector.beginSelectionSession(context.Background(), account.ProviderBuild, 0, "model-a", "", "", nil, false)
+	if !errors.As(err, &unavailable) || unavailable.Reason != SelectionCooling {
+		t.Fatalf("mark failure selection error = %v, want cooling", err)
+	}
+	if currentBase, currentOverlay := repo.callCounts("model-a"); currentBase != baseCalls || currentOverlay != overlayCalls {
+		t.Fatalf("mark failure rebuilt snapshots: base %d->%d overlay %d->%d", baseCalls, currentBase, overlayCalls, currentOverlay)
+	}
+}
+
+func TestSelectorHealthInvalidationRejectsOlderAccountRevision(t *testing.T) {
+	selector := NewSelector(nil, nil, nil, nil, time.Hour, time.Second, time.Minute)
+	now := time.Now().UTC()
+	cooldownUntil := now.Add(time.Minute)
+	selector.ApplyInvalidation(repository.InvalidationEvent{
+		Kind: repository.InvalidationAccountHealthChanged, Provider: account.ProviderBuild, AccountID: 7,
+		FailureCount: 2, CooldownUntil: &cooldownUntil, Revision: 20, PublishedAt: now,
+	})
+	selector.ApplyInvalidation(repository.InvalidationEvent{
+		Kind: repository.InvalidationAccountHealthChanged, Provider: account.ProviderBuild, AccountID: 7,
+		Revision: 19, PublishedAt: now.Add(time.Second),
+	})
+	value := selector.applyRoutingHealth(account.Credential{ID: 7, Provider: account.ProviderBuild}, now)
+	if value.FailureCount != 2 || value.CooldownUntil == nil || !value.CooldownUntil.Equal(cooldownUntil) {
+		t.Fatalf("older recovery replaced newer cooldown: %#v", value)
+	}
+
+	selector.ApplyInvalidation(repository.InvalidationEvent{
+		Kind: repository.InvalidationAccountHealthChanged, Provider: account.ProviderBuild, AccountID: 7,
+		Revision: 21, PublishedAt: now.Add(2 * time.Second),
+	})
+	value = selector.applyRoutingHealth(value, now)
+	if value.FailureCount != 0 || value.CooldownUntil != nil || value.LastError != "" {
+		t.Fatalf("newer recovery was not applied: %#v", value)
 	}
 }
 
@@ -539,6 +657,75 @@ func TestSelectorHydratesOnlyClaimedCredentialAndSkipsStaleCandidate(t *testing.
 	}
 }
 
+func TestSelectorSkipsCredentialMaterialLoadErrorAndUsesNextAccount(t *testing.T) {
+	repo := newLayeredRepositoryFixture()
+	repo.bases = []account.RoutingAccountBase{
+		{Credential: account.Credential{ID: 1, Provider: account.ProviderBuild, Enabled: true, AuthStatus: account.AuthStatusActive, Priority: 20}},
+		{Credential: account.Credential{ID: 2, Provider: account.ProviderBuild, Enabled: true, AuthStatus: account.AuthStatusActive, Priority: 10}},
+	}
+	repo.overlays["model-a"] = account.RoutingOverlaySnapshot{Values: []account.RoutingAccountOverlay{
+		{AccountID: 1, ModelCapabilityKnown: true, SupportsModel: true},
+		{AccountID: 2, ModelCapabilityKnown: true, SupportsModel: true},
+	}}
+	repo.materialErrors = map[uint64]error{1: context.DeadlineExceeded}
+	repo.materials = map[uint64]account.CredentialMaterial{
+		2: {AccountID: 2, Provider: account.ProviderBuild, AuthType: account.AuthTypeOAuth, EncryptedAccessToken: "selected-secret"},
+	}
+	selector := NewSelector(repo, memory.NewConcurrencyLimiter(), memory.NewStickyStore(), nil, time.Hour, time.Second, time.Minute)
+
+	lease, err := selector.Acquire(context.Background(), account.ProviderBuild, 0, "model-a", "", "", nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lease.Release()
+	if lease.Credential.ID != 2 || lease.Credential.EncryptedAccessToken != "selected-secret" {
+		t.Fatalf("lease credential = %#v", lease.Credential)
+	}
+	if !reflect.DeepEqual(repo.materialCalls, []uint64{1, 2}) {
+		t.Fatalf("material calls = %v, want [1 2]", repo.materialCalls)
+	}
+}
+
+func TestSelectorCredentialMaterialContextCancelDoesNotDrainPool(t *testing.T) {
+	repo := newLayeredRepositoryFixture()
+	repo.bases = []account.RoutingAccountBase{
+		{Credential: account.Credential{ID: 1, Provider: account.ProviderBuild, Enabled: true, AuthStatus: account.AuthStatusActive, Priority: 20}},
+		{Credential: account.Credential{ID: 2, Provider: account.ProviderBuild, Enabled: true, AuthStatus: account.AuthStatusActive, Priority: 10}},
+	}
+	repo.overlays["model-a"] = account.RoutingOverlaySnapshot{Values: []account.RoutingAccountOverlay{
+		{AccountID: 1, ModelCapabilityKnown: true, SupportsModel: true},
+		{AccountID: 2, ModelCapabilityKnown: true, SupportsModel: true},
+	}}
+	selector := NewSelector(repo, memory.NewConcurrencyLimiter(), memory.NewStickyStore(), nil, time.Hour, time.Second, time.Minute)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	repo.materialHook = func(loadCtx context.Context, accountID uint64) error {
+		if accountID == 1 {
+			cancel()
+			return loadCtx.Err()
+		}
+		return nil
+	}
+
+	_, err := selector.Acquire(ctx, account.ProviderBuild, 0, "model-a", "", "", nil, false)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context canceled", err)
+	}
+	if !reflect.DeepEqual(repo.materialCalls, []uint64{1}) {
+		t.Fatalf("material calls = %v, want cancellation during the first load to stop selection", repo.materialCalls)
+	}
+}
+
+func TestSkipUnusableCredentialMaterialHonorsCancel(t *testing.T) {
+	selector := NewSelector(nil, nil, nil, nil, time.Hour, time.Second, time.Minute)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := selector.skipUnusableCredentialMaterial(ctx, account.Credential{ID: 1, Provider: account.ProviderBuild}, temporaryRoutingLoadError{message: "temporary credential store timeout"}, nil)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context canceled", err)
+	}
+}
+
 func TestSelectorReportsNoAccountsWhenEveryCredentialIsStale(t *testing.T) {
 	repo := newLayeredRepositoryFixture()
 	repo.materialErrors = map[uint64]error{1: repository.ErrNotFound}
@@ -561,11 +748,46 @@ func TestSelectorPinnedCredentialDoesNotSwitchWhenMaterialIsStale(t *testing.T) 
 
 	_, err := selector.AcquirePinned(context.Background(), account.ProviderBuild, 1, 0, "model-a", "", true)
 	var unavailable *SelectionUnavailableError
-	if !errors.As(err, &unavailable) || unavailable.Reason != SelectionNoAccounts {
-		t.Fatalf("error = %v, want no accounts", err)
+	if !errors.As(err, &unavailable) || unavailable.Reason != SelectionPinnedUnavailable {
+		t.Fatalf("error = %v, want pinned unavailable", err)
 	}
 	if !reflect.DeepEqual(repo.materialCalls, []uint64{1}) {
 		t.Fatalf("material calls = %v, want pinned account only", repo.materialCalls)
+	}
+}
+
+func TestSelectorRebindsStickySessionAfterCredentialMaterialLoadError(t *testing.T) {
+	repo := newLayeredRepositoryFixture()
+	repo.bases = []account.RoutingAccountBase{
+		{Credential: account.Credential{ID: 1, Provider: account.ProviderBuild, Enabled: true, AuthStatus: account.AuthStatusActive, Priority: 20}},
+		{Credential: account.Credential{ID: 2, Provider: account.ProviderBuild, Enabled: true, AuthStatus: account.AuthStatusActive, Priority: 10}},
+	}
+	repo.overlays["model-a"] = account.RoutingOverlaySnapshot{Values: []account.RoutingAccountOverlay{
+		{AccountID: 1, ModelCapabilityKnown: true, SupportsModel: true},
+		{AccountID: 2, ModelCapabilityKnown: true, SupportsModel: true},
+	}}
+	repo.materialErrors = map[uint64]error{1: temporaryRoutingLoadError{message: "temporary credential store timeout"}}
+	repo.materials = map[uint64]account.CredentialMaterial{
+		2: {AccountID: 2, Provider: account.ProviderBuild, AuthType: account.AuthTypeOAuth, EncryptedAccessToken: "selected-secret"},
+	}
+	sticky := memory.NewStickyStore()
+	affinity := "load-error-session"
+	if err := sticky.Set(context.Background(), stickySessionKey(affinity), 1, time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	selector := NewSelector(repo, memory.NewConcurrencyLimiter(), sticky, nil, time.Hour, time.Second, time.Minute)
+
+	lease, err := selector.Acquire(context.Background(), account.ProviderBuild, 0, "model-a", "", affinity, nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lease.Release()
+	if lease.Credential.ID != 2 {
+		t.Fatalf("selected account = %d, want fallback account 2", lease.Credential.ID)
+	}
+	boundID, ok, err := sticky.Get(context.Background(), stickySessionKey(affinity), time.Now())
+	if err != nil || !ok || boundID != 2 {
+		t.Fatalf("sticky binding = %d, ok=%v, err=%v", boundID, ok, err)
 	}
 }
 
@@ -597,8 +819,16 @@ func TestSelectorRebindsStickySessionAfterCredentialBecomesStale(t *testing.T) {
 	}
 }
 
-func TestSelectorReleasesCapacityWhenCredentialHydrationFails(t *testing.T) {
+func TestSelectorPropagatesPermanentCredentialMaterialLoadErrorAndReleasesCapacity(t *testing.T) {
 	repo := newLayeredRepositoryFixture()
+	repo.bases = []account.RoutingAccountBase{
+		{Credential: account.Credential{ID: 1, Provider: account.ProviderBuild, Enabled: true, AuthStatus: account.AuthStatusActive, Priority: 20}},
+		{Credential: account.Credential{ID: 2, Provider: account.ProviderBuild, Enabled: true, AuthStatus: account.AuthStatusActive, Priority: 10}},
+	}
+	repo.overlays["model-a"] = account.RoutingOverlaySnapshot{Values: []account.RoutingAccountOverlay{
+		{AccountID: 1, ModelCapabilityKnown: true, SupportsModel: true},
+		{AccountID: 2, ModelCapabilityKnown: true, SupportsModel: true},
+	}}
 	loadErr := errors.New("credential storage unavailable")
 	repo.materialErrors = map[uint64]error{1: loadErr}
 	limiter := memory.NewConcurrencyLimiter()
@@ -606,7 +836,10 @@ func TestSelectorReleasesCapacityWhenCredentialHydrationFails(t *testing.T) {
 
 	_, err := selector.Acquire(context.Background(), account.ProviderBuild, 0, "model-a", "", "", nil, false)
 	if !errors.Is(err, loadErr) {
-		t.Fatalf("error = %v, want credential storage error", err)
+		t.Fatalf("error = %v, want original credential storage error", err)
+	}
+	if !reflect.DeepEqual(repo.materialCalls, []uint64{1}) {
+		t.Fatalf("material calls = %v, want permanent error not to drain the pool", repo.materialCalls)
 	}
 	current, currentErr := limiter.Current(context.Background(), repository.AccountConcurrencyKey(1))
 	if currentErr != nil {
@@ -614,6 +847,44 @@ func TestSelectorReleasesCapacityWhenCredentialHydrationFails(t *testing.T) {
 	}
 	if current != 0 {
 		t.Fatalf("current concurrency = %d, want released slot", current)
+	}
+}
+
+func TestSelectorStopsAfterRepeatedCredentialMaterialLoadFailures(t *testing.T) {
+	repo := newLayeredRepositoryFixture()
+	candidateCount := credentialMaterialFailureSkipLimit + 2
+	repo.bases = make([]account.RoutingAccountBase, 0, candidateCount)
+	overlays := make([]account.RoutingAccountOverlay, 0, candidateCount)
+	repo.materialErrors = make(map[uint64]error, candidateCount)
+	for index := 0; index < candidateCount; index++ {
+		accountID := uint64(index + 1)
+		repo.bases = append(repo.bases, account.RoutingAccountBase{Credential: account.Credential{
+			ID: accountID, Provider: account.ProviderBuild, Enabled: true, AuthStatus: account.AuthStatusActive, Priority: candidateCount - index,
+		}})
+		overlays = append(overlays, account.RoutingAccountOverlay{AccountID: accountID, ModelCapabilityKnown: true, SupportsModel: true})
+		repo.materialErrors[accountID] = temporaryRoutingLoadError{message: "credential store temporarily unavailable"}
+	}
+	repo.overlays["model-a"] = account.RoutingOverlaySnapshot{Values: overlays}
+	limiter := memory.NewConcurrencyLimiter()
+	selector := NewSelector(repo, limiter, memory.NewStickyStore(), nil, time.Hour, time.Second, time.Minute)
+
+	_, err := selector.Acquire(context.Background(), account.ProviderBuild, 0, "model-a", "", "", nil, false)
+	var temporaryErr temporaryRoutingLoadError
+	if !errors.As(err, &temporaryErr) {
+		t.Fatalf("error = %v, want original temporary credential storage error", err)
+	}
+	wantCalls := credentialMaterialFailureSkipLimit + 1
+	if len(repo.materialCalls) != wantCalls {
+		t.Fatalf("material call count = %d, want %d bounded attempts; calls=%v", len(repo.materialCalls), wantCalls, repo.materialCalls)
+	}
+	for _, accountID := range repo.materialCalls {
+		current, currentErr := limiter.Current(context.Background(), repository.AccountConcurrencyKey(accountID))
+		if currentErr != nil {
+			t.Fatal(currentErr)
+		}
+		if current != 0 {
+			t.Fatalf("account %d concurrency = %d, want released slot", accountID, current)
+		}
 	}
 }
 
@@ -716,6 +987,24 @@ func TestAssembleRoutingCandidatesAllowsRecognizedStaticConsoleModelWithStaleSna
 	unknown := assembleRoutingCandidates(account.ProviderConsole, "", bases, overlay)
 	if len(unknown) != 1 || !unknown[0].ModelCapabilityKnown || unknown[0].SupportsModel {
 		t.Fatalf("unknown Console model = %#v", unknown)
+	}
+}
+
+func TestAssembleRoutingCandidatesAllowsRecognizedWebImagineModelWithStaleSnapshot(t *testing.T) {
+	bases := []account.RoutingAccountBase{{Credential: account.Credential{
+		ID: 1, Provider: account.ProviderWeb, Enabled: true, AuthStatus: account.AuthStatusActive,
+	}}}
+	overlay := account.RoutingOverlaySnapshot{Values: []account.RoutingAccountOverlay{{
+		AccountID: 1, ModelCapabilityKnown: true, SupportsModel: false,
+	}}}
+
+	recognized := assembleRoutingCandidates(account.ProviderWeb, account.QuotaModeWebImagePro, bases, overlay)
+	if len(recognized) != 1 || !recognized[0].ModelCapabilityKnown || !recognized[0].SupportsModel {
+		t.Fatalf("recognized Web Imagine model = %#v", recognized)
+	}
+	unknown := assembleRoutingCandidates(account.ProviderWeb, "", bases, overlay)
+	if len(unknown) != 1 || !unknown[0].ModelCapabilityKnown || unknown[0].SupportsModel {
+		t.Fatalf("unknown Web model = %#v", unknown)
 	}
 }
 

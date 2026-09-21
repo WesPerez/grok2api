@@ -10,6 +10,10 @@ import (
 
 // convertChatRequest 将 Chat Completions 请求完整转换为标准 Responses 输入。
 func convertChatRequest(body []byte, model string) ([]byte, ResponseOptions, error) {
+	return convertChatRequestWithReasoningReplay(body, model, nil, "")
+}
+
+func convertChatRequestWithReasoningReplay(body []byte, model string, cache *ReasoningCache, scope string) ([]byte, ResponseOptions, error) {
 	var source map[string]json.RawMessage
 	if err := json.Unmarshal(body, &source); err != nil {
 		return nil, ResponseOptions{}, fmt.Errorf("解析 Chat Completions 请求: %w", err)
@@ -18,7 +22,7 @@ func convertChatRequest(body []byte, model string) ([]byte, ResponseOptions, err
 	if err := json.Unmarshal(source["messages"], &messages); err != nil || len(messages) == 0 {
 		return nil, ResponseOptions{}, errors.New("messages 必须是非空数组")
 	}
-	input, err := convertChatMessages(messages)
+	input, err := convertChatMessagesWithReasoningReplay(messages, cache, scope)
 	if err != nil {
 		return nil, ResponseOptions{}, err
 	}
@@ -69,7 +73,7 @@ func convertChatRequest(body []byte, model string) ([]byte, ResponseOptions, err
 		target["tool_choice"] = choice
 	}
 	converted, err := json.Marshal(target)
-	return converted, ResponseOptions{StopSequences: stopSequences}, err
+	return converted, ResponseOptions{StopSequences: stopSequences}.WithReasoningReplay(cache, scope), err
 }
 
 func parseChatStopSequences(raw json.RawMessage) ([]string, error) {
@@ -107,6 +111,10 @@ type chatMessage struct {
 }
 
 func convertChatMessages(messages []chatMessage) ([]any, error) {
+	return convertChatMessagesWithReasoningReplay(messages, nil, "")
+}
+
+func convertChatMessagesWithReasoningReplay(messages []chatMessage, cache *ReasoningCache, scope string) ([]any, error) {
 	input := make([]any, 0, len(messages))
 	for _, message := range messages {
 		role := strings.ToLower(strings.TrimSpace(message.Role))
@@ -124,7 +132,7 @@ func convertChatMessages(messages []chatMessage) ([]any, error) {
 				if err != nil {
 					return nil, err
 				}
-				input = append(input, calls...)
+				input = append(input, restoreReasoningForCalls(calls, cache, scope)...)
 			}
 		case "tool":
 			if strings.TrimSpace(message.ToolCallID) == "" {
@@ -275,13 +283,9 @@ func convertChatTools(raw json.RawMessage) ([]any, error) {
 			object, _ := value.(map[string]any)
 			switch typeName {
 			case "web_search", "web_search_preview", "web_search_preview_2025_03_11", "web_search_2025_08_26":
-				converted := map[string]any{"type": "web_search"}
-				if filters, ok := object["filters"].(map[string]any); ok {
-					if domains, exists := filters["allowed_domains"]; exists {
-						converted["filters"] = map[string]any{"allowed_domains": domains}
-					}
-				} else if domains, exists := object["allowed_domains"]; exists {
-					converted["filters"] = map[string]any{"allowed_domains": domains}
+				converted, err := convertChatWebSearchTool(object)
+				if err != nil {
+					return nil, err
 				}
 				result = append(result, converted)
 			default:
@@ -297,6 +301,89 @@ func convertChatTools(raw json.RawMessage) ([]any, error) {
 		result = append(result, function)
 	}
 	return result, nil
+}
+
+func convertChatWebSearchTool(tool map[string]any) (map[string]any, error) {
+	nested := make(map[string][]any, 2)
+	if rawFilters, exists := tool["filters"]; exists && rawFilters != nil {
+		filters, ok := rawFilters.(map[string]any)
+		if !ok {
+			return nil, errors.New("web_search filters 必须是对象")
+		}
+		for _, field := range []string{"allowed_domains", "excluded_domains"} {
+			if value, exists := filters[field]; exists {
+				domains, err := normalizeChatWebSearchDomains(value, field)
+				if err != nil {
+					return nil, err
+				}
+				nested[field] = domains
+			}
+		}
+	}
+
+	resultFilters := make(map[string]any, 2)
+	for _, field := range []string{"allowed_domains", "excluded_domains"} {
+		var topLevel []any
+		if value, exists := tool[field]; exists {
+			domains, err := normalizeChatWebSearchDomains(value, field)
+			if err != nil {
+				return nil, err
+			}
+			topLevel = domains
+		}
+		domains := nested[field]
+		if len(domains) > 0 && len(topLevel) > 0 && !sameChatWebSearchDomains(domains, topLevel) {
+			return nil, fmt.Errorf("web_search %s 声明冲突", field)
+		}
+		if len(domains) == 0 {
+			domains = topLevel
+		}
+		if len(domains) > 0 {
+			resultFilters[field] = domains
+		}
+	}
+	if _, hasAllowed := resultFilters["allowed_domains"]; hasAllowed {
+		if _, hasExcluded := resultFilters["excluded_domains"]; hasExcluded {
+			return nil, errors.New("web_search 不能同时设置 allowed_domains 和 excluded_domains")
+		}
+	}
+	converted := map[string]any{"type": "web_search"}
+	if len(resultFilters) > 0 {
+		converted["filters"] = resultFilters
+	}
+	return converted, nil
+}
+
+func normalizeChatWebSearchDomains(value any, field string) ([]any, error) {
+	if value == nil {
+		return nil, nil
+	}
+	domains, ok := value.([]any)
+	if !ok {
+		return nil, fmt.Errorf("web_search %s 必须是字符串数组", field)
+	}
+	if len(domains) > MaxWebSearchDomains {
+		return nil, fmt.Errorf("web_search %s 不能超过 %d 个域名", field, MaxWebSearchDomains)
+	}
+	for index, value := range domains {
+		domain, ok := value.(string)
+		if !ok || strings.TrimSpace(domain) == "" {
+			return nil, fmt.Errorf("web_search %s[%d] 必须是非空字符串", field, index)
+		}
+	}
+	return domains, nil
+}
+
+func sameChatWebSearchDomains(left, right []any) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
 }
 
 func containsToolType(tools []any, kind string) bool {
@@ -326,4 +413,108 @@ func convertChatToolChoice(raw json.RawMessage) (json.RawMessage, error) {
 		return nil, errors.New("tool_choice.function.name 无效")
 	}
 	return mustJSON(map[string]any{"type": "function", "name": function.Name}), nil
+}
+
+func restoreReasoningForCalls(calls []any, cache *ReasoningCache, scope string) []any {
+	if cache == nil || strings.TrimSpace(scope) == "" {
+		return calls
+	}
+	// A cached reasoning item may be inserted before each call, so the final
+	// slice can be larger than calls. Use the input size as a safe initial
+	// capacity and let append grow it; len(calls)+1 is unnecessary and can
+	// overflow for a maximally sized input slice.
+	result := make([]any, 0, len(calls))
+	seenIDs := make(map[string]struct{})
+	seenEncrypted := make(map[string]struct{})
+	for _, raw := range calls {
+		callMap, ok := raw.(map[string]any)
+		if !ok {
+			result = append(result, raw)
+			continue
+		}
+		callID, _ := callMap["call_id"].(string)
+		if item, found := cache.GetScoped(scope, callID); found && item.ID != "" && item.Encrypted != "" && !reasoningAlreadyEmitted(seenIDs, seenEncrypted, item) {
+			result = append(result, reasoningInputItem(item))
+			markReasoningEmitted(seenIDs, seenEncrypted, item)
+		}
+		result = append(result, raw)
+	}
+	return result
+}
+
+func reasoningAlreadyEmitted(ids, encrypted map[string]struct{}, item responseItem) bool {
+	if id := strings.TrimSpace(item.ID); id != "" {
+		if _, exists := ids[id]; exists {
+			return true
+		}
+	}
+	if value := strings.TrimSpace(item.Encrypted); value != "" {
+		if _, exists := encrypted[value]; exists {
+			return true
+		}
+	}
+	return false
+}
+
+func markReasoningEmitted(ids, encrypted map[string]struct{}, item responseItem) {
+	if id := strings.TrimSpace(item.ID); id != "" {
+		ids[id] = struct{}{}
+	}
+	if value := strings.TrimSpace(item.Encrypted); value != "" {
+		encrypted[value] = struct{}{}
+	}
+}
+
+func reasoningInputItem(item responseItem) map[string]any {
+	payload := map[string]any{
+		"type":   "reasoning",
+		"id":     item.ID,
+		"status": "completed",
+	}
+	if item.Encrypted != "" {
+		payload["encrypted_content"] = item.Encrypted
+	}
+	if summary := cleanReasoningContents(item.Summary); len(summary) > 0 {
+		payload["summary"] = summary
+	} else if item.Encrypted != "" {
+		// Build's replay schema requires a summary member when an opaque proof is
+		// present. An empty array is the canonical representation for a redacted
+		// or summary-less reasoning item.
+		payload["summary"] = []any{}
+	}
+	// Omit content when it is nil/empty. Build treats content:null as a
+	// mutation of the opaque reasoning/compaction payload.
+	if content := cleanReasoningContents(item.Content); len(content) > 0 {
+		payload["content"] = content
+	}
+	return payload
+}
+
+// cleanReasoningContents converts the internal response representation back to
+// the small Responses input shape. responseContent's struct tags intentionally
+// do not use omitempty because they are also used for decoding upstream output;
+// assigning the structs directly here would therefore emit refusal:"" and
+// annotations:null and make an opaque reasoning item look rewritten.
+func cleanReasoningContents(contents []responseContent) []any {
+	if len(contents) == 0 {
+		return nil
+	}
+	cleaned := make([]any, 0, len(contents))
+	for _, content := range contents {
+		value := make(map[string]any, 4)
+		if content.Type != "" {
+			value["type"] = content.Type
+		}
+		if content.Text != "" || content.Type == "summary_text" || content.Type == "reasoning_text" || content.Type == "output_text" {
+			value["text"] = content.Text
+		}
+		if content.Refusal != "" {
+			value["refusal"] = content.Refusal
+		}
+		if content.Annotations != nil {
+			value["annotations"] = content.Annotations
+		}
+		cleaned = append(cleaned, value)
+	}
+	return cleaned
 }

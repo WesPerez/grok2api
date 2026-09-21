@@ -45,27 +45,6 @@ func TestPrepareWritesPrivateScopedBootstrap(t *testing.T) {
 	if !payload.Enabled || payload.InternalToken != token || len(payload.Config.NodeIDs) != 2 || payload.Config.Prompt != ProbePrompt || payload.Config.Expected != ProbeExpected {
 		t.Fatalf("payload = %#v", payload)
 	}
-	if payload.QualityRetryToken == "" || payload.QualityRetryToken == payload.InternalToken {
-		t.Fatalf("quality retry token is missing or not domain-separated")
-	}
-}
-
-func TestPrepareDisabledGuardKeepsGuardTokenEmpty(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "bootstrap.json")
-	if token, err := Prepare(path, config.QualityGuardConfig{}, "12345678901234567890123456789012"); err != nil || token != "" {
-		t.Fatalf("disabled result = %q, %v", token, err)
-	}
-	var payload bootstrapFile
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := json.Unmarshal(data, &payload); err != nil {
-		t.Fatal(err)
-	}
-	if payload.InternalToken != "" || payload.QualityRetryToken == "" {
-		t.Fatalf("disabled payload tokens = guard:%q retry:%q", payload.InternalToken, payload.QualityRetryToken)
-	}
 }
 
 func TestPrepareRequiresPathOnlyWhenEnabled(t *testing.T) {

@@ -26,6 +26,7 @@ type ConcurrencyLimiter interface {
 }
 
 // ConcurrencySnapshotReader 批量读取并发租约快照；调度器会优先使用它减少远程运行态往返。
+// 返回值允许省略计数为零的键，读取方必须将缺失项视为零。
 type ConcurrencySnapshotReader interface {
 	CurrentMany(ctx context.Context, keys []string) (map[string]int, error)
 }
@@ -89,16 +90,21 @@ type SettingsChangeBus interface {
 type InvalidationKind string
 
 const (
-	InvalidationRouteChanged             InvalidationKind = "route_changed"
-	InvalidationModelBindingChanged      InvalidationKind = "model_binding_changed"
-	InvalidationAccountStateChanged      InvalidationKind = "account_state_changed"
-	InvalidationAccountCredentialChanged InvalidationKind = "account_credential_changed"
-	InvalidationAccountCapabilityChanged InvalidationKind = "account_capability_changed"
-	InvalidationAccountBillingChanged    InvalidationKind = "account_billing_changed"
-	InvalidationAccountQuotaChanged      InvalidationKind = "account_quota_changed"
-	InvalidationAccountRecoveryChanged   InvalidationKind = "account_recovery_changed"
-	InvalidationAccountModelQuotaChanged InvalidationKind = "account_model_quota_changed"
-	InvalidationClientKeyChanged         InvalidationKind = "client_key_changed"
+	InvalidationRouteChanged        InvalidationKind = "route_changed"
+	InvalidationModelBindingChanged InvalidationKind = "model_binding_changed"
+	InvalidationAccountStateChanged InvalidationKind = "account_state_changed"
+	// InvalidationAccountHealthChanged carries the exact request-path health
+	// mutation for one account. Unlike an arbitrary account state change, it can
+	// be applied as a small runtime overlay without rebuilding the provider pool.
+	InvalidationAccountHealthChanged      InvalidationKind = "account_health_changed"
+	InvalidationAccountCredentialChanged  InvalidationKind = "account_credential_changed"
+	InvalidationAccountCapabilityChanged  InvalidationKind = "account_capability_changed"
+	InvalidationAccountBillingChanged     InvalidationKind = "account_billing_changed"
+	InvalidationAccountQuotaChanged       InvalidationKind = "account_quota_changed"
+	InvalidationAccountRecoveryChanged    InvalidationKind = "account_recovery_changed"
+	InvalidationAccountEgressLeaseChanged InvalidationKind = "account_egress_lease_changed"
+	InvalidationAccountModelQuotaChanged  InvalidationKind = "account_model_quota_changed"
+	InvalidationClientKeyChanged          InvalidationKind = "client_key_changed"
 )
 
 type InvalidationLayer string
@@ -111,14 +117,19 @@ const (
 )
 
 type InvalidationEvent struct {
-	Kind           InvalidationKind `json:"kind"`
-	Provider       account.Provider `json:"provider,omitempty"`
-	AccountID      uint64           `json:"accountId,omitempty"`
-	ClientKeyID    uint64           `json:"clientKeyId,omitempty"`
-	UpstreamModel  string           `json:"upstreamModel,omitempty"`
-	Revision       uint64           `json:"revision,omitempty"`
-	SourceInstance string           `json:"sourceInstance,omitempty"`
-	PublishedAt    time.Time        `json:"publishedAt,omitempty"`
+	Kind          InvalidationKind `json:"kind"`
+	Provider      account.Provider `json:"provider,omitempty"`
+	AccountID     uint64           `json:"accountId,omitempty"`
+	ClientKeyID   uint64           `json:"clientKeyId,omitempty"`
+	UpstreamModel string           `json:"upstreamModel,omitempty"`
+	FailureCount  int              `json:"failureCount,omitempty"`
+	CooldownUntil *time.Time       `json:"cooldownUntil,omitempty"`
+	// HealthMarker carries only domain-approved, non-sensitive durable markers.
+	// Arbitrary upstream error text must never be published on the runtime bus.
+	HealthMarker   string    `json:"healthMarker,omitempty"`
+	Revision       uint64    `json:"revision,omitempty"`
+	SourceInstance string    `json:"sourceInstance,omitempty"`
+	PublishedAt    time.Time `json:"publishedAt,omitempty"`
 }
 
 func (e InvalidationEvent) Layer() InvalidationLayer {
@@ -127,7 +138,7 @@ func (e InvalidationEvent) Layer() InvalidationLayer {
 		return InvalidationLayerRoute
 	case InvalidationModelBindingChanged, InvalidationAccountCapabilityChanged, InvalidationAccountModelQuotaChanged:
 		return InvalidationLayerOverlay
-	case InvalidationAccountStateChanged, InvalidationAccountCredentialChanged, InvalidationAccountBillingChanged, InvalidationAccountQuotaChanged, InvalidationAccountRecoveryChanged:
+	case InvalidationAccountStateChanged, InvalidationAccountHealthChanged, InvalidationAccountCredentialChanged, InvalidationAccountBillingChanged, InvalidationAccountQuotaChanged, InvalidationAccountRecoveryChanged, InvalidationAccountEgressLeaseChanged:
 		return InvalidationLayerBase
 	case InvalidationClientKeyChanged:
 		return InvalidationLayerClientKey
@@ -143,6 +154,9 @@ func (e InvalidationEvent) Valid() bool {
 	}
 	if layer == InvalidationLayerClientKey {
 		return e.Provider == "" && e.AccountID == 0 && e.UpstreamModel == ""
+	}
+	if e.Kind == InvalidationAccountHealthChanged {
+		return e.AccountID != 0 && (e.Provider == account.ProviderBuild || e.Provider == account.ProviderWeb || e.Provider == account.ProviderConsole)
 	}
 	switch e.Provider {
 	case "", account.ProviderBuild, account.ProviderWeb, account.ProviderConsole:

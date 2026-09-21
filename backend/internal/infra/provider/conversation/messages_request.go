@@ -10,6 +10,10 @@ import (
 const anthropicBillingHeaderPrefix = "x-anthropic-billing-header: "
 
 func convertMessagesRequest(body []byte, model string) ([]byte, ResponseOptions, error) {
+	return convertMessagesRequestWithReasoningReplay(body, model, nil, "")
+}
+
+func convertMessagesRequestWithReasoningReplay(body []byte, model string, cache *ReasoningCache, scope string) ([]byte, ResponseOptions, error) {
 	var request anthropicRequest
 	if err := json.Unmarshal(body, &request); err != nil {
 		return nil, ResponseOptions{}, fmt.Errorf("解析 Messages 请求: %w", err)
@@ -31,16 +35,32 @@ func convertMessagesRequest(body []byte, model string) ([]byte, ResponseOptions,
 		}
 	}
 	thinkingEnabled := false
+	reasoningEffort := ""
+	reasoningEffortSet := false
 	if request.Thinking != nil {
 		switch request.Thinking.Type {
-		case "", "disabled":
+		case "":
+		case "disabled":
+			reasoningEffort = "none"
+			reasoningEffortSet = true
 		case "enabled", "adaptive":
 			thinkingEnabled = true
 		default:
 			return nil, ResponseOptions{}, fmt.Errorf("不支持 thinking.type=%q", request.Thinking.Type)
 		}
 	}
-	input, inlineInstructions, err := convertAnthropicMessages(request.Messages, anthropicDeclaredToolNames(request.Tools))
+	// Hosted web search has a separate server-side history contract.  The
+	// gateway deliberately does not bridge opaque reasoning for these turns
+	// (see the adapter's web-search isolation below), so disable the bridge
+	// before converting messages rather than trying to remove an already
+	// injected item afterwards.
+	hasWebSearchTool := hasAnthropicWebSearchTool(request.Tools)
+	webSearchEnabled := hasWebSearchTool && (request.ToolChoice == nil || !strings.EqualFold(strings.TrimSpace(request.ToolChoice.Type), "none"))
+	replayCache, replayScope := cache, scope
+	if webSearchEnabled {
+		replayCache, replayScope = nil, ""
+	}
+	input, inlineInstructions, err := convertAnthropicMessagesWithReasoningReplay(request.Messages, anthropicDeclaredToolNames(request.Tools), replayCache, replayScope)
 	if err != nil {
 		return nil, ResponseOptions{}, err
 	}
@@ -74,8 +94,6 @@ func convertMessagesRequest(body []byte, model string) ([]byte, ResponseOptions,
 		}
 		target["text"] = map[string]any{"format": map[string]any{"type": "json_schema", "name": "anthropic_output", "schema": request.OutputConfig.Format.Schema}}
 	}
-	hasWebSearchTool := hasAnthropicWebSearchTool(request.Tools)
-	webSearchEnabled := hasWebSearchTool && (request.ToolChoice == nil || !strings.EqualFold(strings.TrimSpace(request.ToolChoice.Type), "none"))
 	webSearchRequired := webSearchEnabled && anthropicWebSearchRequired(request.Tools, request.ToolChoice)
 	webSearchQuery := ""
 	if webSearchEnabled {
@@ -83,6 +101,9 @@ func convertMessagesRequest(body []byte, model string) ([]byte, ResponseOptions,
 	}
 	if thinkingEnabled {
 		effort := anthropicThinkingEffort(request.Thinking.BudgetTokens)
+		if request.Thinking.Effort != "" {
+			effort = request.Thinking.Effort
+		}
 		if request.OutputConfig != nil && request.OutputConfig.Effort != "" {
 			effort = request.OutputConfig.Effort
 		}
@@ -93,6 +114,8 @@ func convertMessagesRequest(body []byte, model string) ([]byte, ResponseOptions,
 		default:
 			return nil, ResponseOptions{}, fmt.Errorf("不支持 output_config.effort=%q", effort)
 		}
+		reasoningEffort = effort
+		reasoningEffortSet = true
 		target["reasoning"] = map[string]any{"effort": effort, "summary": "detailed"}
 		target["include"] = []any{"reasoning.encrypted_content"}
 	}
@@ -122,11 +145,13 @@ func convertMessagesRequest(body []byte, model string) ([]byte, ResponseOptions,
 	converted, err := json.Marshal(target)
 	return converted, ResponseOptions{
 		AnthropicThinking:          thinkingEnabled,
+		ReasoningEffort:            reasoningEffort,
+		ReasoningEffortSet:         reasoningEffortSet,
 		AnthropicWebSearch:         webSearchEnabled,
 		AnthropicWebSearchRequired: webSearchRequired,
 		AnthropicWebSearchQuery:    webSearchQuery,
 		StopSequences:              append([]string(nil), request.StopSequences...),
-	}, err
+	}.WithReasoningReplay(replayCache, replayScope), err
 }
 
 type anthropicRequest struct {
@@ -141,6 +166,7 @@ type anthropicRequest struct {
 	Metadata      map[string]any     `json:"metadata"`
 	Thinking      *struct {
 		Type         string `json:"type"`
+		Effort       string `json:"effort"`
 		BudgetTokens int    `json:"budget_tokens"`
 	} `json:"thinking"`
 	TopK         json.RawMessage      `json:"top_k"`
@@ -168,11 +194,32 @@ type anthropicToolChoice struct {
 }
 
 func convertAnthropicMessages(messages []anthropicMessage, declaredTools map[string]struct{}) ([]any, []string, error) {
+	return convertAnthropicMessagesWithReasoningReplay(messages, declaredTools, nil, "")
+}
+
+func convertAnthropicMessagesWithReasoningReplay(messages []anthropicMessage, declaredTools map[string]struct{}, cache *ReasoningCache, scope string) ([]any, []string, error) {
 	input := make([]any, 0, len(messages))
 	instructions := make([]string, 0)
 	pendingCalls := make(map[string]struct{})
 	usedCalls := make(map[string]struct{})
 	serverSearches := make(map[string]map[string]any)
+	seenReasoningIDs := make(map[string]struct{})
+	seenReasoningEncrypted := make(map[string]struct{})
+	// A client is allowed to preserve an Anthropic thinking block in a
+	// different order from the tool_use block.  Pre-scan explicit signatures so
+	// a cached bridge item is not emitted first and then duplicated when that
+	// explicit block is encountered later in the same history.
+	explicitReasoningEncrypted := anthropicExplicitReasoningProofs(messages)
+	appendCachedReasoning := func(item responseItem) {
+		if item.ID == "" || item.Encrypted == "" || reasoningAlreadyEmitted(seenReasoningIDs, seenReasoningEncrypted, item) {
+			return
+		}
+		if _, exists := explicitReasoningEncrypted[strings.TrimSpace(item.Encrypted)]; exists {
+			return
+		}
+		input = append(input, reasoningInputItem(item))
+		markReasoningEmitted(seenReasoningIDs, seenReasoningEncrypted, item)
+	}
 	for messageIndex, message := range messages {
 		role := strings.ToLower(strings.TrimSpace(message.Role))
 		if role == "system" || role == "developer" {
@@ -255,6 +302,11 @@ func convertAnthropicMessages(messages []anthropicMessage, declaredTools map[str
 					return nil, nil, fmt.Errorf("%s 包含重复 tool_use id %q", path, value.ID)
 				}
 				arguments, _ := json.Marshal(value.Input)
+				if cache != nil && strings.TrimSpace(scope) != "" {
+					if reasoning, found := cache.GetScoped(scope, value.ID); found && reasoning.ID != "" && reasoning.Encrypted != "" {
+						appendCachedReasoning(reasoning)
+					}
+				}
 				input = append(input, map[string]any{"type": "function_call", "call_id": value.ID, "name": value.Name, "arguments": string(arguments)})
 				pendingCalls[value.ID] = struct{}{}
 				usedCalls[value.ID] = struct{}{}
@@ -299,6 +351,7 @@ func convertAnthropicMessages(messages []anthropicMessage, declaredTools map[str
 					item["encrypted_content"] = signature
 				}
 				input = append(input, item)
+				markReasoningEmitted(seenReasoningIDs, seenReasoningEncrypted, responseItem{Encrypted: signature})
 			case "redacted_thinking":
 				if role != "assistant" {
 					return nil, nil, fmt.Errorf("%s redacted_thinking 只允许出现在 assistant 消息", path)
@@ -311,6 +364,7 @@ func convertAnthropicMessages(messages []anthropicMessage, declaredTools map[str
 				// Grok Build requires summary to exist whenever encrypted_content is replayed.
 				// An empty array is the canonical Anthropic redacted_thinking representation.
 				input = append(input, map[string]any{"type": "reasoning", "summary": []any{}, "encrypted_content": data})
+				markReasoningEmitted(seenReasoningIDs, seenReasoningEncrypted, responseItem{Encrypted: data})
 			case "server_tool_use":
 				if role != "assistant" {
 					continue
@@ -356,6 +410,34 @@ func convertAnthropicMessages(messages []anthropicMessage, declaredTools map[str
 		return nil, nil, errors.New("messages 必须为每个 tool_use 提供 tool_result")
 	}
 	return input, instructions, nil
+}
+
+func anthropicExplicitReasoningProofs(messages []anthropicMessage) map[string]struct{} {
+	proofs := make(map[string]struct{})
+	for _, message := range messages {
+		if !strings.EqualFold(strings.TrimSpace(message.Role), "assistant") {
+			continue
+		}
+		var blocks []map[string]json.RawMessage
+		if json.Unmarshal(message.Content, &blocks) != nil {
+			continue
+		}
+		for _, block := range blocks {
+			var typeName string
+			_ = json.Unmarshal(block["type"], &typeName)
+			var proof string
+			switch typeName {
+			case "thinking":
+				_ = json.Unmarshal(block["signature"], &proof)
+			case "redacted_thinking":
+				_ = json.Unmarshal(block["data"], &proof)
+			}
+			if proof = strings.TrimSpace(proof); proof != "" {
+				proofs[proof] = struct{}{}
+			}
+		}
+	}
+	return proofs
 }
 
 func applyAnthropicWebSearchResult(call map[string]any, raw json.RawMessage) {
@@ -686,7 +768,7 @@ func convertAnthropicWebSearchTool(tool map[string]json.RawMessage, index int) (
 		switch key {
 		case "type", "name", "cache_control":
 			continue
-		case "allowed_domains":
+		case "allowed_domains", "blocked_domains", "excluded_domains":
 			var value any
 			if json.Unmarshal(raw, &value) != nil {
 				return nil, fmt.Errorf("tools[%d].%s 无效", index, key)
@@ -695,17 +777,38 @@ func convertAnthropicWebSearchTool(tool map[string]json.RawMessage, index int) (
 			if !ok {
 				return nil, fmt.Errorf("tools[%d].%s 必须是字符串数组", index, key)
 			}
-			if len(domains) > 5 {
-				return nil, fmt.Errorf("tools[%d].%s 不能超过 5 个域名", index, key)
+			if len(domains) > MaxWebSearchDomains {
+				return nil, fmt.Errorf("tools[%d].%s 不能超过 %d 个域名", index, key, MaxWebSearchDomains)
 			}
 			for domainIndex, domain := range domains {
 				if text, ok := domain.(string); !ok || strings.TrimSpace(text) == "" {
 					return nil, fmt.Errorf("tools[%d].%s[%d] 必须是非空字符串", index, key, domainIndex)
 				}
 			}
-			converted["filters"] = map[string]any{"allowed_domains": value}
-		case "max_uses", "blocked_domains", "user_location", "search_context_size":
-			// The Build web-search wire contract supports only allowed_domains. Do not forward other optional Anthropic controls,
+			field := key
+			if field == "blocked_domains" {
+				field = "excluded_domains"
+			}
+			filters, _ := converted["filters"].(map[string]any)
+			if filters == nil {
+				filters = make(map[string]any, 2)
+			}
+			if len(domains) > 0 {
+				if _, exists := filters[field]; exists {
+					return nil, fmt.Errorf("tools[%d].%s 与同义域名过滤字段重复", index, key)
+				}
+				other := "allowed_domains"
+				if field == other {
+					other = "excluded_domains"
+				}
+				if existing, ok := filters[other].([]any); ok && len(existing) > 0 {
+					return nil, fmt.Errorf("tools[%d] 不能同时设置 allowed_domains 和 blocked_domains/excluded_domains", index)
+				}
+				filters[field] = value
+				converted["filters"] = filters
+			}
+		case "max_uses", "user_location", "search_context_size":
+			// These Anthropic controls have no equivalent in the Build web-search wire contract,
 			// preventing unknown parameters from causing the upstream to reject the request.
 			continue
 		default:

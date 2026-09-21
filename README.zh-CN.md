@@ -32,8 +32,12 @@
 
 <table>
 <tr>
-<td width="200" align="center" valign="middle"><a href="https://www.krill-ai.com/register?invite=KJ2VGIRVAE"><img src="https://raw.githubusercontent.com/Krill-ai-org/krill-ai-static/refs/heads/main/krill-logo/Eng/250x150.png" alt="Krill AI" width="160"></a></td>
-<td valign="middle">感谢 Krill AI 赞助了本项目！Krill 提供 GPT / Claude / Gemini / 多款国产模型的官方稳定极速的 API 中转服务，支持企业级定制、报销开票、7×16h 专属技术支持。更有独家适配的 WebSocket 连接，畅享极速首字速度。Krill 为本项目提供了特别优惠，使用<a href="https://www.krill-ai.com/register?invite=KJ2VGIRVAE">此链接</a>注册并在下订单时填写「grok2api」优惠码，首购套餐可享 Codex 77 折优惠！</td>
+<td width="200" align="center" valign="middle"><a href="https://go.apimart.ai/gh-grok2api"><img src="frontend/public/sponner/api-mart.jpg" alt="APIMart" width="180"></a></td>
+<td valign="middle">感谢 APIMart 赞助了本项目！APIMart 是专注 AI 图片/视频生成的低价 API 平台，GPT-Image-2 低至 $0.006/张，1 美元可出图 160+ 张。图片、视频一套异步 API 通吃，提交任务拿 ID、回调取结果，跑批万张不超时、换模型不改代码。按量付费、无月费，通过此 <a href="https://go.apimart.ai/gh-grok2api">注册链接</a> 注册即可开用。</td>
+</tr>
+<tr>
+<td width="200" align="center" valign="middle"><a href="https://www.packyapi.com/register"><img src="frontend/public/sponner/packycode.png" alt="PackyCode" width="180"></a></td>
+<td valign="middle">PackyCode 是稳定专业的 API 中转服务商，支持 Claude Code、Codex、Gemini 及多种国模，提供统一高速入口、全栈可观测、风控与弹性扩容。<a href="https://www.packyapi.com/register">点此注册</a>，轻松将大模型接入业务流程。</td>
 </tr>
 <tr>
 <td width="200" align="center" valign="middle"><a href="https://github.com/DEEIX-AI/DEEIX-Chat"><img src="frontend/public/sponner/deeix-chat_deeix-ai.png" alt="DEEIX AI / DEEIX Chat" width="160"></a></td>
@@ -44,12 +48,8 @@
 <td valign="middle">Right Code 是一个企业级 AI Agent 分发平台，主要提供稳定的 Claude Code、Codex、Gemini 等模型的中转服务。充值即可开票，企业、团队用户一对一对接。感谢 Right Code 提供的 Tokens 支持，点击 <a href="https://www.right.codes/register">此处</a> 注册并开始使用！</td>
 </tr>
 <tr>
-<td width="200" align="center" valign="middle"><a href="https://api.fenno.ai/s/xCBS"><img src="frontend/public/sponner/fenno-ai.jpg" alt="FennoAI" width="160"></a></td>
-<td valign="middle">FennoAI 面向企业研发团队和开发者提供企业级的高稳定、高性能 API 中转服务，兼容 OpenAI 与 Anthropic 协议，可接入 Codex、Claude Code、OpenCode 等主流 AI 编程工具。平台具备企业级稳定性，可支撑千亿 Token/日调用，以及境内外主体公对公结算与开票。Grok2API 用户通过<a href="https://api.fenno.ai/s/xCBS">专属链接</a>购买订阅，仅需 1.99 美元即可获得价值 50 美元的 Coding Plan 额度，邀请好友购买最高可获 20% 返佣。</td>
-</tr>
-<tr>
-<td width="200" align="center" valign="middle"><a href="https://s.qiniu.com/RNNZFf"><img src="frontend/public/sponner/qiniu.jpg" alt="七牛云 AI" width="160"></a></td>
-<td valign="middle">七牛云 AI 是七牛云（02567.HK）旗下企业级大模型 MaaS 平台，可一站式调用全球 150+ 主流模型，兼容主流模型厂商协议，覆盖文本、图像、音频、视频和文件处理等全模态能力，已服务超过 169 万企业及开发者用户。Grok2API 用户通过<a href="https://s.qiniu.com/RNNZFf">专属链接</a>注册，企业用户可免费领取 1200 万 Token，开发者可免费领取 300 万 Token。</td>
+<td width="200" align="center" valign="middle"><a href="https://www.swiftproxy.net/?ref=grok2api"><img src="frontend/public/sponner/swift-proxy.png" alt="Swiftproxy" width="180"></a></td>
+<td valign="middle">Swiftproxy 提供 9000 万+ 纯净住宅 IP，覆盖全球 220+ 个国家和地区，支持 HTTP(S)/SOCKS5、IP 轮换、Sticky Session 及精准地域定位，为 API 服务和自动化工作流提供稳定的全球网络访问，适用于 API 请求、自动化、数据采集及地域访问等场景。住宅代理低至 $0.7/GB，支持免费测试，使用优惠码 PROXY90 可享 9 折优惠。<a href="https://www.swiftproxy.net/?ref=grok2api">立即体验 Swiftproxy</a>。</td>
 </tr>
 </table>
 
@@ -139,7 +139,7 @@ flowchart LR
 | 路由 | 模型发现、Provider 限定、会话粘滞、额度/并发门禁和有界切换 |
 | 会话 | stored response、compact、Prompt Cache 亲和与可选 reasoning replay |
 | 媒体 | 图片生成与编辑、视频任务、本地归档及 URL/Base64/SSE 输出 |
-| 出口 | HTTP/SOCKS/Resin、订阅、探测、代理池、调配、回退与 FlareSolverr |
+| 出口 | HTTP/SOCKS/Resin 与 Trojan/VLESS/Shadowsocks/VMess 隧道、订阅、探测、代理池、调配、回退与 FlareSolverr |
 | 运维 | Dashboard、模型路由、客户端密钥、审计、运行设置和媒体库 |
 
 ### Provider 边界
@@ -148,9 +148,9 @@ flowchart LR
 | :-- | :-- | :-- | :-- |
 | Grok Build | OAuth / 设备授权 | 按账号动态发现 | Responses、Chat、Messages、compact、stored response、付费账号视频 |
 | Grok Web | SSO | 内置并按等级过滤 | Responses、Chat、Messages、stored response、图片、图片编辑、视频 |
-| Grok Console | SSO | 内置 | 无状态 Responses、Chat、Messages、图片、图片编辑、视频 |
+| Grok Console | SSO | 内置 | 无状态 Responses、Chat、Messages、图片、图片编辑、视频、TTS、STT、Realtime |
 
-三个 Provider 独立维护凭据、额度、健康、冷却、并发与模型能力。故障切换不会跨 Provider 混用账号状态。
+三个 Provider 独立维护凭据、额度、健康、冷却、并发与模型能力。单条路由的账号重试始终留在当前 Provider；当同一对外模型名主动聚合了多条路由时，网关可选择另一条可调度路由，但不会跨 Provider 混用账号状态。
 
 ## 快速部署
 
@@ -225,6 +225,8 @@ pnpm dev
 
 导入兼容 UTF-8 BOM。批量额度同步、Build 凭据续期、Web→Build/Console 转换、账号工具和账号清理均显示实时进度。
 
+Build Refresh Token 在续期时可能发生轮换。请勿让 grok2api、官方 CLI、其他网关或独立客户端同时使用同一份 Build 凭据，否则其中一个客户端可能消费另一个客户端仍在保存的旧 Token。建议为每个活跃客户端分别授权；如需迁移凭据，应先停止旧客户端继续使用。
+
 Web 账号工具支持接受协议、设置对应 20–40 岁的随机生日和开启 NSFW；已完成步骤会记录并在后续执行时跳过。
 
 系统支持自动删除长期处于 `reauthRequired` 的账号，默认关闭；存在活动推理租约或视频任务的账号不会被删除。
@@ -259,13 +261,13 @@ Web 使用内置目录并按账号等级过滤；更高等级继承低等级模�
 | `grok-chat-expert` | 对话 | Super | Chat Completions、Responses、Messages |
 | `grok-chat-heavy` | 对话 | Heavy | Chat Completions、Responses、Messages |
 | `grok-imagine-image-lite` | 图像 | Basic | Images Generations |
-| `grok-imagine-image-quality-lite` | 图像 | Super | Images Generations |
+| `grok-imagine-image-quality-lite` | 图像 | Basic | Images Generations |
 | `grok-imagine-image-edit` | 图像编辑 | Super | Images Edits |
 | `grok-imagine-video` | 视频 | Super | Videos |
 
 ### Grok Console
 
-Console 使用当前版本内置目录。对话为无状态转发；图片和视频使用 xAI 标准资源接口。
+Console 使用当前版本内置目录。对话为无状态转发；图片、视频和语音使用 xAI 标准资源接口。
 
 | 模型 | 类型 | 网关接口能力 |
 | :-- | :-- | :-- |
@@ -277,7 +279,11 @@ Console 使用当前版本内置目录。对话为无状态转发；图片和视
 | `grok-build-0.1` | 对话 | Chat Completions、Responses、Messages |
 | `grok-imagine-image` | 图像、图像编辑 | Images Generations、Images Edits |
 | `grok-imagine-image-quality` | 图像、图像编辑 | Images Generations、Images Edits |
+| `grok-imagine-image-2.0` | 图像、图像编辑 | Images Generations、Images Edits |
 | `grok-imagine-video` | 视频 | Videos |
+| `grok-imagine-video-1.5` | 视频 | 视频生成，包括 Free Console 账号 |
+| `grok-voice-latest`、`grok-voice-think-fast-2.0`、`grok-voice-think-fast-1.0` | 语音 | TTS 和 Realtime WebSocket 代理 |
+| `grok-stt` | 语音 | STT 和 OpenAI 兼容的音频转录 |
 
 同一个 Console 图片模型的生成与编辑能力会聚合展示为一条逻辑模型，不需要创建 `-edit` 模型副本。
 
@@ -287,7 +293,7 @@ Web 可与对应的 Build、Console 建立一对一弱关联。关联只共享�
 
 ### Codex、Claude Code 与 Prompt Cache
 
-Responses 与 Messages 支持流式、工具、推理、多轮会话和 compact。客户端会话信号会保持稳定，用于 Grok Build Prompt Cache 亲和；实际命中仍要求上游账号兼容且请求前缀未变化。
+Responses 与 Messages 支持流式、工具、推理、多轮会话和 compact。客户端会话信号会保持稳定，用于 Grok Build Prompt Cache 亲和；实际命中仍要求上游账号兼容且请求前缀未变化。同一网关实例内，仍可解密的 `g2a_compact_v1` 摘要在 session / PromptCacheKey 漂移后也会展开；带该前缀但无法解码的 blob 会返回 400。其他 compact blob 作为上游原始状态转发时会保留原始 `encrypted_content`；若 Build 拒绝，该错误会原样返回客户端。
 
 Responses 与 Chat Completions 按 OpenAI 语义报告输入总量；Messages 按 Anthropic 语义分开报告未缓存输入和缓存读取。审计保留输入总量与缓存部分，用于计费对账。
 
@@ -310,9 +316,14 @@ Authorization: Bearer g2a_xxx_xxx
 | `POST` | `/v1/messages` | Anthropic Messages JSON/SSE |
 | `POST` | `/v1/images/generations`、`/v1/images/edits` | 生成或编辑图片 |
 | `POST`、`GET` | `/v1/videos/*` | 创建和查询视频任务 |
+| `POST` | `/v1/tts`、`/v1/audio/speech`、`/v1/audio/tasks` | 语音合成 |
+| `POST` | `/v1/stt`、`/v1/audio/transcriptions` | 音频转录 |
+| `GET` | `/v1/stt`、`/v1/realtime` | 代理语音 WebSocket 会话 |
 | `GET` | `/v1/media/images/{asset_id}`、`/v1/media/videos/{asset_id}` | 读取归档媒体 |
 
 stored response 和 compact 取决于最终 Provider。登录管理端后可在 `/docs` 查看当前模型与调用示例；仅在 `server.swaggerEnabled: true` 时提供 Swagger。
+
+`/v1/audio/transcriptions` 支持 `json`（默认）、`verbose_json` 和 `text`。视频编辑与延长按实际路由校验 Console `grok-imagine-video`，对外模型名仍可自定义。金额计费以网关能够可靠测量的官方计价单位为准：TTS 按输入字符数预留并结算，REST 与流式 STT 按成功响应返回的实际音频时长结算。STT 时长只能在请求完成后获得，因此并发中的请求可能使有限额 Key 短暂超过金额上限。Realtime、视频编辑与延长，以及未收录官方定价的自定义路由当前记录为“未计费”，保持可调用且不消耗金额额度。
 
 客户端密钥支持模型白名单，以及可选的 RPM、并发、用量和截止日期限制。
 
@@ -331,13 +342,17 @@ curl http://127.0.0.1:8000/v1/responses \
 
 出口节点按 Build、Web、Console 或 Web 资源隔离。管理端支持：
 
-- HTTP、HTTPS、SOCKS4/4A、SOCKS5/5H 与 Resin
+- HTTP、HTTPS、SOCKS4/4A、SOCKS5/5H、Resin、Trojan、VLESS、Shadowsocks 与 VMess
+- 隧道协议支持 TCP、WebSocket 和 TLS，未实现的传输形态会在导入时拒绝
 - 订阅和文本/Base64 导入
 - 批量探测、筛选、删除、分配与均衡
 - 按作用域配置无回退、直连或固定节点
 - 代理池模式，单次连接失败不会触发全局冷却
 - 固定代理传输失败后立即复测；同节点复测自动合并，后续绑定请求限时等待并在恢复后快速重试
 - 可选的[出口质量守护程序](./tools/egress-quality-guard/README.zh-CN.md)，支持逐节点模型探测、防误杀隔离和自动恢复；通过内置的 `quality-guard` Compose profile 按需启用
+- 代理用户名包含 `{account}` 的节点会被识别为租约级节点：被动审计异常只会临时移出对应的账号租约，冷却后固定使用同一账号和节点复测，复测异常会续期；若 sidecar 不可用，已到期的隔离不会继续阻断路由，避免孤儿状态永久卡住账号。共享节点始终不会因此停用，也不会暴露渲染后的代理身份。普通固定 sticky 会话仍可按独立节点管理
+
+Hysteria 与 TUIC 暂未支持。FlareSolverr 仅接受 HTTP/SOCKS 代理地址，因此自动刷新 Clearance 暂不能直接使用隧道分享链接。
 
 首次启用时只需在 `config.yaml` 中增加 `qualityGuard` 并启动 profile。主程序会自动创建并稳定复用不可导出的系统探测身份：
 
@@ -345,7 +360,20 @@ curl http://127.0.0.1:8000/v1/responses \
 qualityGuard:
   enabled: true
   model: "grok-4.6"
+  # 思考模型缺流式 reasoning 时先扣住响应，换号再打，不把降智正文发给用户。
+  # 最多观察 30 秒；stub 加上足够可见输出在超时后扣住（TUI 30s 后的短问候），
+  # 空 stub 继续等。floor 已达标但 1 秒内吐短回复的也扣。
+  requestRetry:
+    enabled: true
+    maxAttempts: 6
+    holdTimeout: 30s
+    minOutputTokens: 8
+    onExhausted: fail_closed # fail_open | fail_closed
+    accountCooldown: 12h
+    idleAccountCooldown: 15m
 ```
+
+`requestRetry` 在网关请求路径上生效，与 sidecar 探测/隔离相互独立。`config.example.yaml` 里 `enabled` 仍为 false，打开后才拦截。开启后，可见输出达到 `minOutputTokens` 且全程无流式 reasoning 时**不发给用户**；只有可安全重放的无状态请求才会排除账号重试。TUI 续聊（`previous_response_id`）和 hosted tools 仍会进入 hold 检测，但质量拦截不会把账号绑定状态或有副作用的工具跨账号重放，最终按 `onExhausted` 返回 `503 quality_degraded` 或放出当前响应。上下文压缩、图片、视频和 ForcedEgress 探针不受影响。
 
 ```bash
 docker compose --profile quality-guard up -d --build
@@ -371,7 +399,12 @@ socks5h://Default.{account}:RESIN_PROXY_TOKEN@resin:2260
 docker compose --profile flaresolverr up -d
 ```
 
-随后在 **运行设置 → 媒体与网络 → Clearance** 选择 `FlareSolverr`，地址填写 `http://flaresolverr:8191`。
+随后在 **运行设置 → 媒体与网络 → Clearance** 填写 `http://flaresolverr:8191`，并选择一种托管模式：
+
+- `FlareSolverr` 按配置周期主动刷新固定出口中过期的 Clearance。
+- `按需刷新` 不按时间淘汰最后一次成功的 Clearance，只在上游明确拒绝并将其标记失效后重新求解；后台定时任务不会在该模式下启动浏览器。
+
+`手动维护` 始终不会调用 FlareSolverr。按需模式允许首次请求不携带托管 Clearance；若被 Cloudflare 拒绝，下一次租约会执行一次经过并发去重的求解。
 
 出口层只重试可以确认发生在请求提交前的连接故障，不会重放已经提交的生成请求、认证失败、额度耗尽或上游限流。
 
@@ -396,11 +429,48 @@ GROK2API_DATABASE_URL='postgresql://user:password@host:5432/grok2api?sslmode=req
 
 非空的 `GROK2API_DATABASE_URL` 会覆盖 `database.postgres.dsn` 并自动选择 `postgres`；空值不会覆盖 YAML。支持 `postgres://` 和 `postgresql://`，SQLAlchemy 的 `postgresql+asyncpg://` 会返回格式迁移提示。程序不会隐式读取通用的 `DATABASE_URL`；平台只提供该变量时，可在部署清单中显式映射为 `GROK2API_DATABASE_URL: "${DATABASE_URL}"`。数据库配置优先级为：内置默认值 < `config.yaml` < `GROK2API_DATABASE_URL`。当前 CLI 没有数据库覆盖参数。
 
+### 反向代理后的客户端 IP
+
+请求审计会记录规范化的客户端 IPv4 或 IPv6 地址。客户端直连 grok2api 时无需额外配置；经过 Nginx 等反向代理时，需要同时配置代理和 grok2api：
+
+1. 在 Nginx 中转发标准客户端 IP 请求头：
+
+```nginx
+location / {
+    proxy_pass http://127.0.0.1:8000;
+
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
+```
+
+2. 在 `config.yaml` 中仅信任 Nginx 的实际地址或隔离网络：
+
+```yaml
+server:
+  trustedProxies:
+    - "127.0.0.1"
+```
+
+使用 Docker 时，grok2api 看到的对端可能是网桥网关或另一个容器，而不是 `127.0.0.1`。配置前可查询 Compose 网络：
+
+```bash
+docker network inspect grok2api_default \
+  --format '{{(index .IPAM.Config 0).Subnet}}'
+```
+
+例如隔离网络返回 `172.20.0.0/16` 时，可以将该 CIDR 配置为可信代理。不要使用 `0.0.0.0/0` 或 `::/0`；grok2api 会拒绝不受限的可信代理范围。未配置 `trustedProxies` 时，所有转发头都会被忽略，审计记录 TCP 直连对端地址，从而避免客户端伪造 `X-Forwarded-For`。
+
+如果 Nginx 前还有 Cloudflare，应先使用 Cloudflare 官方代理网段和 `CF-Connecting-IP` 正确配置 Nginx real-IP 模块，不要信任任意来源提供的 `CF-Connecting-IP`。修改 `server.trustedProxies` 后需要重启 grok2api；修改 Nginx 配置后需要重新加载 Nginx。
+
 重要的可选设置：
 
 - `audit.ledgerMode`：`observe` 仅报告账本故障；`enforce` 可暂停新推理以保护计费准确性。
 - `routing.accountIsolatedConnections`：为外部 L4 或按连接哈希的负载均衡器按账号拆分出站 TCP/HTTP 连接池。默认关闭，因为会增加连接数、TLS 握手、内存和文件描述符占用。
-- `routing.segmentedSelectorEnabled`：用于大型账号池，同时保留完整选号回退与原子门禁。
+- `routing.segmentedSelectorEnabled`：默认对至少 3000 个可用账号的大号池启用，限制动态并发读取规模，同时保留额度/等级优先级、会话粘性、完整选号回退与原子门禁。
+- `routing.autoAssignMaxNodeShare` / `routing.autoAssignMaxMigrationShare`：可选的大号池保护。`0`（默认）保持历史行为：不健康节点上的 auto 账号会一次性迁走，容量/再均衡仍最多 200 次。仅在隔离一个节点会把大量账号压到最后几个健康出口时，才设为 `0.05`–`1`。环境变量 `GROK2API_AUTO_ASSIGN_MAX_NODE_SHARE` 与 `GROK2API_AUTO_ASSIGN_MAX_MIGRATION_SHARE` 可覆盖 YAML。
 - Build 响应头超时和精确匹配的 403 失效规则支持热加载。
 - “同步最新版本”可应用已验证的 Grok Build 客户端版本和 User-Agent。
 

@@ -8,8 +8,8 @@ export type SettingsConfigDTO = {
   providerWeb: {
     baseURL: string; quotaTimeout: string; chatTimeout: string; streamIdleTimeout: string; imageTimeout: string; videoTimeout: string;
     statsigMode: "manual" | "url"; statsigManualValue?: string; statsigManualConfigured: boolean; statsigSignerURL: string;
-    clearanceMode: "manual" | "flaresolverr"; flareSolverrURL: string; clearanceTimeout: string; clearanceRefresh: string;
-    mediaConcurrency: number; allowNSFW: boolean;
+    clearanceMode: ClearanceMode; flareSolverrURL: string; clearanceTimeout: string; clearanceRefresh: string;
+    mediaConcurrency: number; allowNSFW: boolean; freeVideoDurationCap?: number;
     recoveryBackoffBase: string; recoveryBackoffMax: string;
   };
   providerConsole: { baseURL: string; chatTimeout: string; streamIdleTimeout: string };
@@ -20,11 +20,11 @@ export type SettingsConfigDTO = {
   };
   frontend: { publicApiBaseURL: string };
   routing: {
-    stickyTTL: string; cooldownBase: string; cooldownMax: string; capacityWait: string; maxAttempts: number; preferFreeBuild: boolean; markBuildChatDeniedAsReauth: boolean;
+    stickyTTL: string; cooldownBase: string; cooldownMax: string; capacityWait: string; maxAttempts: number; videoMaxAttempts: number; preferFreeBuild: boolean; markBuildChatDeniedAsReauth: boolean;
     accountIsolatedConnections: boolean;
     segmentedSelector: { enabled: boolean; minCandidates: number; windowSize: number };
   };
-  audit: { bufferSize: number; batchSize: number; flushInterval: string; commitDelayMS: number };
+  audit: { bufferSize: number; batchSize: number; flushInterval: string; commitDelayMS: number; retentionDays?: number };
   clientKeyDefaults: { rpmLimit: number; maxConcurrent: number };
   accounts: {
     markBuildForbiddenReauth: boolean;
@@ -37,10 +37,12 @@ export type SettingsConfigDTO = {
   };
 };
 
+export type ClearanceMode = "manual" | "flaresolverr" | "on_demand";
+
 export type EgressNodeDTO = {
 	id: string; name: string; scope: EgressScope; enabled: boolean;
-	proxyConfigured: boolean; userAgent: string; cookieConfigured: boolean;
-	accountBoundProxy: boolean; proxyPool: boolean;
+	proxyConfigured: boolean; proxyDisplay?: string; proxyFingerprint?: string; userAgent: string; cookieConfigured: boolean;
+	accountBoundProxy: boolean; proxyPool: boolean; proxyProfileId?: string; proxyProfileName?: string;
 	sourceId?: string; accountCapacity: number; assignedAccountCount: number;
 	health: number; failureCount: number; cooldownUntil?: string; lastError?: string;
 	probeStatus: "unknown" | "healthy" | "unhealthy"; lastProbedAt?: string; probeLatencyMs: number; exitIp?: string; probeError?: string;
@@ -50,7 +52,21 @@ export type EgressNodeDTO = {
 
 export type EgressNodeInput = {
 	name: string; scope: EgressScope; enabled: boolean; proxyPool: boolean; proxyURL?: string;
+	proxyProfileId?: string;
 	accountCapacity: number; clearProxyURL?: boolean; userAgent: string; cloudflareCookies?: string; clearCookies?: boolean;
+};
+
+export type EgressProxyProfileDTO = {
+	id: string; name: string; proxyDisplay?: string; proxyFingerprint?: string;
+	boundNodeCount: number; createdAt: string; updatedAt: string;
+};
+
+export type EgressProxyProfileInput = { name: string; proxyURL?: string };
+export type EgressProxyProfileListDTO = {
+	items: EgressProxyProfileDTO[];
+	page: number;
+	pageSize: number;
+	total: number;
 };
 
 export type EgressScope = "grok_build" | "grok_web" | "grok_console" | "grok_web_asset" | "grok_console_asset";
@@ -64,7 +80,7 @@ export type EgressNodeListDTO = {
   defaultUserAgents: Record<EgressScope, string>;
 };
 export type EgressSourceDTO = {
-  id: string; name: string; scope: EgressScope; enabled: boolean; urlConfigured: boolean;
+  id: string; name: string; scope: EgressScope; enabled: boolean; urlConfigured: boolean; proxyConfigured: boolean;
   refreshIntervalSeconds: number; defaultAccountCapacity: number;
   lastSyncedAt?: string; nextSyncAt?: string; lastSyncImported: number; lastSyncError?: string;
 };
@@ -76,16 +92,12 @@ export type EgressSourceListDTO = {
 };
 export type EgressSourceInput = {
   name: string; scope: EgressScope; enabled: boolean; url?: string; clearUrl?: boolean;
+  proxyURL?: string; clearProxyURL?: boolean;
   refreshIntervalSeconds: number; defaultAccountCapacity: number;
 };
 export type EgressOperationsConfigDTO = {
   probeProvider: "ipinfo" | "cloudflare"; probeIntervalSeconds: number; autoAssignEnabled: boolean; autoBalanceEnabled: boolean;
   assignmentIntervalSeconds: number; fallbacks: Record<EgressScope, EgressFallbackConfigDTO>; updatedAt: string;
-  subscriptionProxyConfigured: boolean;
-};
-export type EgressOperationsConfigInput = Omit<EgressOperationsConfigDTO, "updatedAt" | "subscriptionProxyConfigured"> & {
-  subscriptionProxyURL?: string;
-  clearSubscriptionProxy?: boolean;
 };
 export type EgressImportResultDTO = { imported: number; skipped: number };
 export type EgressIPProbeDTO = { status: "unknown" | "healthy" | "unhealthy"; testedAt?: string; latencyMs: number; exitIp?: string; error?: string };
@@ -108,19 +120,22 @@ const settingsConfigValidator = hasShape({
   providerWeb: hasShape({
     baseURL: isString, quotaTimeout: isString, chatTimeout: isString, streamIdleTimeout: isOptional(isString), imageTimeout: isString, videoTimeout: isString,
     statsigMode: isOneOf("manual", "url"), statsigManualValue: isOptional(isString), statsigManualConfigured: isBoolean,
-    statsigSignerURL: isString, clearanceMode: isOneOf("manual", "flaresolverr"), flareSolverrURL: isString,
-    clearanceTimeout: isString, clearanceRefresh: isString, mediaConcurrency: isNumber, allowNSFW: isBoolean, recoveryBackoffBase: isString, recoveryBackoffMax: isString,
+    statsigSignerURL: isString, clearanceMode: isOneOf("manual", "flaresolverr", "on_demand"), flareSolverrURL: isString,
+    clearanceTimeout: isString, clearanceRefresh: isString, mediaConcurrency: isNumber, allowNSFW: isBoolean, freeVideoDurationCap: isOptional(isNumber), recoveryBackoffBase: isString, recoveryBackoffMax: isString,
   }),
   providerConsole: hasShape({ baseURL: isString, chatTimeout: isString, streamIdleTimeout: isOptional(isString) }),
   batch: hasShape({ importConcurrency: isNumber, conversionConcurrency: isNumber, syncConcurrency: isNumber, refreshConcurrency: isNumber, randomDelay: isString }),
   media: hasShape({ maxImageBytes: isNumber, maxTotalBytes: isNumber, cleanupThresholdPercent: isNumber, cleanupInterval: isString }),
   frontend: hasShape({ publicApiBaseURL: isString }),
   routing: hasShape({
-    stickyTTL: isString, cooldownBase: isString, cooldownMax: isString, capacityWait: isString, maxAttempts: isNumber, preferFreeBuild: isBoolean, markBuildChatDeniedAsReauth: isBoolean,
+    stickyTTL: isString, cooldownBase: isString, cooldownMax: isString, capacityWait: isString, maxAttempts: isNumber, videoMaxAttempts: isNumber, preferFreeBuild: isBoolean, markBuildChatDeniedAsReauth: isBoolean,
     accountIsolatedConnections: isOptional(isBoolean),
     segmentedSelector: isOptional(hasShape({ enabled: isBoolean, minCandidates: isNumber, windowSize: isNumber })),
   }),
-  audit: hasShape({ bufferSize: isNumber, batchSize: isNumber, flushInterval: isString, commitDelayMS: isOptional(isNumber) }),
+  audit: hasShape({
+    bufferSize: isNumber, batchSize: isNumber, flushInterval: isString, commitDelayMS: isOptional(isNumber),
+    retentionDays: isOptional(isNumber),
+  }),
   clientKeyDefaults: hasShape({ rpmLimit: isNumber, maxConcurrent: isNumber }),
   // Older backends may omit accounts; withSettingsDefaults supplies a safe local default.
   accounts: isOptional(hasShape({
@@ -144,7 +159,7 @@ const defaultAccountsConfig = (): SettingsConfigDTO["accounts"] => ({
 });
 function withSettingsDefaults(snapshot: SettingsSnapshotDTO): SettingsSnapshotDTO {
   const accounts = snapshot.config.accounts ?? defaultAccountsConfig();
-  const segmentedSelector = snapshot.config.routing.segmentedSelector ?? { enabled: false, minCandidates: 3000, windowSize: 64 };
+  const segmentedSelector = snapshot.config.routing.segmentedSelector ?? { enabled: true, minCandidates: 3000, windowSize: 64 };
   return {
     ...snapshot,
     config: {
@@ -160,13 +175,14 @@ function withSettingsDefaults(snapshot: SettingsSnapshotDTO): SettingsSnapshotDT
       audit: {
         ...snapshot.config.audit,
         commitDelayMS: snapshot.config.audit.commitDelayMS ?? 5,
+        retentionDays: snapshot.config.audit.retentionDays ?? 7,
       },
       routing: {
         ...snapshot.config.routing,
         markBuildChatDeniedAsReauth: snapshot.config.routing.markBuildChatDeniedAsReauth ?? false,
         accountIsolatedConnections: snapshot.config.routing.accountIsolatedConnections ?? false,
         segmentedSelector: {
-          enabled: segmentedSelector.enabled ?? false,
+          enabled: segmentedSelector.enabled ?? true,
           minCandidates: segmentedSelector.minCandidates || 3000,
           windowSize: segmentedSelector.windowSize || 64,
         },
@@ -195,9 +211,9 @@ const egressIPProbeValidator = hasShape({
   status: isOneOf("unknown", "healthy", "unhealthy"), testedAt: isOptional(isString), latencyMs: isNumber, exitIp: isOptional(isString), error: isOptional(isString),
 });
 type EgressNodeWireDTO = Omit<EgressNodeDTO, "ipv4Probe" | "ipv6Probe"> & { ipv4Probe?: EgressIPProbeDTO; ipv6Probe?: EgressIPProbeDTO };
-type EgressOperationsConfigWireDTO = Omit<EgressOperationsConfigDTO, "probeProvider" | "subscriptionProxyConfigured"> & {
+type EgressSourceWireDTO = Omit<EgressSourceDTO, "proxyConfigured"> & { proxyConfigured?: boolean };
+type EgressOperationsConfigWireDTO = Omit<EgressOperationsConfigDTO, "probeProvider"> & {
   probeProvider?: "ipinfo" | "cloudflare";
-  subscriptionProxyConfigured?: boolean;
 };
 type EgressProbeResultWireDTO = Omit<EgressProbeResultDTO, "ipv4" | "ipv6"> & { ipv4?: EgressIPProbeDTO; ipv6?: EgressIPProbeDTO };
 const unknownEgressIPProbe = (): EgressIPProbeDTO => ({ status: "unknown", latencyMs: 0 });
@@ -206,23 +222,35 @@ const withEgressNodeProbeDefaults = (value: EgressNodeWireDTO): EgressNodeDTO =>
   ipv4Probe: value.ipv4Probe ?? unknownEgressIPProbe(),
   ipv6Probe: value.ipv6Probe ?? unknownEgressIPProbe(),
 });
+const withEgressSourceDefaults = (value: EgressSourceWireDTO): EgressSourceDTO => ({
+  ...value,
+  proxyConfigured: value.proxyConfigured ?? false,
+});
 const egressNodeValidator = hasShape({
   id: isString, name: isString, scope: isOneOf("grok_build", "grok_web", "grok_console", "grok_web_asset", "grok_console_asset"), enabled: isBoolean,
-  proxyConfigured: isBoolean, userAgent: isString, cookieConfigured: isBoolean, accountBoundProxy: isBoolean, proxyPool: isBoolean, health: isNumber, failureCount: isNumber,
-  sourceId: isOptional(isString), accountCapacity: isNumber, assignedAccountCount: isNumber,
+  proxyConfigured: isBoolean, proxyDisplay: isOptional(isString), proxyFingerprint: isOptional(isString), userAgent: isString, cookieConfigured: isBoolean, accountBoundProxy: isBoolean, proxyPool: isBoolean, health: isNumber, failureCount: isNumber,
+  sourceId: isOptional(isString), proxyProfileId: isOptional(isString), proxyProfileName: isOptional(isString), accountCapacity: isNumber, assignedAccountCount: isNumber,
   probeStatus: isOneOf("unknown", "healthy", "unhealthy"), lastProbedAt: isOptional(isString), probeLatencyMs: isNumber, exitIp: isOptional(isString), probeError: isOptional(isString), probeProvider: isOptional(isOneOf("ipinfo", "cloudflare")),
   ipv4Probe: isOptional(egressIPProbeValidator), ipv6Probe: isOptional(egressIPProbeValidator),
   cooldownUntil: isOptional(isString), lastError: isOptional(isString),
 });
 const decodeEgressNodeRaw = createObjectDecoder<EgressNodeWireDTO>("egress node", {
   id: isString, name: isString, scope: isOneOf("grok_build", "grok_web", "grok_console", "grok_web_asset", "grok_console_asset"), enabled: isBoolean,
-  proxyConfigured: isBoolean, userAgent: isString, cookieConfigured: isBoolean, accountBoundProxy: isBoolean, proxyPool: isBoolean, health: isNumber, failureCount: isNumber,
-  sourceId: isOptional(isString), accountCapacity: isNumber, assignedAccountCount: isNumber,
+  proxyConfigured: isBoolean, proxyDisplay: isOptional(isString), proxyFingerprint: isOptional(isString), userAgent: isString, cookieConfigured: isBoolean, accountBoundProxy: isBoolean, proxyPool: isBoolean, health: isNumber, failureCount: isNumber,
+  sourceId: isOptional(isString), proxyProfileId: isOptional(isString), proxyProfileName: isOptional(isString), accountCapacity: isNumber, assignedAccountCount: isNumber,
   probeStatus: isOneOf("unknown", "healthy", "unhealthy"), lastProbedAt: isOptional(isString), probeLatencyMs: isNumber, exitIp: isOptional(isString), probeError: isOptional(isString), probeProvider: isOptional(isOneOf("ipinfo", "cloudflare")),
   ipv4Probe: isOptional(egressIPProbeValidator), ipv6Probe: isOptional(egressIPProbeValidator),
   cooldownUntil: isOptional(isString), lastError: isOptional(isString),
 });
 const decodeEgressNode = (value: unknown) => withEgressNodeProbeDefaults(decodeEgressNodeRaw(value));
+const decodeEgressProxyProfile = createObjectDecoder<EgressProxyProfileDTO>("egress proxy profile", {
+  id: isString, name: isString, proxyDisplay: isOptional(isString), proxyFingerprint: isOptional(isString),
+  boundNodeCount: isNumber, createdAt: isString, updatedAt: isString,
+});
+const decodeEgressProxyProfiles = createObjectDecoder<EgressProxyProfileListDTO>("egress proxy profiles", { items: isArrayOf(hasShape({
+  id: isString, name: isString, proxyDisplay: isOptional(isString), proxyFingerprint: isOptional(isString),
+  boundNodeCount: isNumber, createdAt: isString, updatedAt: isString,
+})), page: isNumber, pageSize: isNumber, total: isNumber });
 type EgressNodeListWireDTO = {
   items: EgressNodeWireDTO[];
   page?: number;
@@ -253,16 +281,19 @@ const decodeEgressNodeList = (value: unknown): EgressNodeListDTO => {
 };
 const egressSourceValidator = hasShape({
   id: isString, name: isString, scope: isOneOf("grok_build", "grok_web", "grok_console", "grok_web_asset", "grok_console_asset"), enabled: isBoolean, urlConfigured: isBoolean,
+  proxyConfigured: isOptional(isBoolean),
   refreshIntervalSeconds: isNumber, defaultAccountCapacity: isNumber, lastSyncedAt: isOptional(isString), nextSyncAt: isOptional(isString),
   lastSyncImported: isNumber, lastSyncError: isOptional(isString),
 });
-const decodeEgressSource = createObjectDecoder<EgressSourceDTO>("egress source", {
+const decodeEgressSourceRaw = createObjectDecoder<EgressSourceWireDTO>("egress source", {
   id: isString, name: isString, scope: isOneOf("grok_build", "grok_web", "grok_console", "grok_web_asset", "grok_console_asset"), enabled: isBoolean, urlConfigured: isBoolean,
+  proxyConfigured: isOptional(isBoolean),
   refreshIntervalSeconds: isNumber, defaultAccountCapacity: isNumber, lastSyncedAt: isOptional(isString), nextSyncAt: isOptional(isString),
   lastSyncImported: isNumber, lastSyncError: isOptional(isString),
 });
+const decodeEgressSource = (value: unknown) => withEgressSourceDefaults(decodeEgressSourceRaw(value));
 type EgressSourceListWireDTO = {
-  items: EgressSourceDTO[];
+  items: EgressSourceWireDTO[];
   page?: number;
   pageSize?: number;
   total?: number;
@@ -274,6 +305,7 @@ const decodeEgressSourceList = (value: unknown): EgressSourceListDTO => {
   const decoded = decodeEgressSourceListRaw(value);
   return {
     ...decoded,
+    items: decoded.items.map(withEgressSourceDefaults),
     page: decoded.page ?? 1,
     pageSize: decoded.pageSize ?? Math.max(20, decoded.items.length),
     total: decoded.total ?? decoded.items.length,
@@ -286,11 +318,10 @@ const egressFallbackConfigValidator = hasShape({ mode: isOneOf("none", "direct",
 const decodeEgressOperationsConfigRaw = createObjectDecoder<EgressOperationsConfigWireDTO>("egress operations config", {
   probeProvider: isOptional(isOneOf("ipinfo", "cloudflare")), probeIntervalSeconds: isNumber, autoAssignEnabled: isBoolean, autoBalanceEnabled: isBoolean, assignmentIntervalSeconds: isNumber,
   fallbacks: isRecordOf(egressFallbackConfigValidator), updatedAt: isString,
-  subscriptionProxyConfigured: isOptional(isBoolean),
 });
 const decodeEgressOperationsConfig = (value: unknown): EgressOperationsConfigDTO => {
   const decoded = decodeEgressOperationsConfigRaw(value);
-  return { ...decoded, probeProvider: decoded.probeProvider ?? "cloudflare", subscriptionProxyConfigured: decoded.subscriptionProxyConfigured ?? false };
+  return { ...decoded, probeProvider: decoded.probeProvider ?? "cloudflare" };
 };
 const decodeEgressProbeResultRaw = createObjectDecoder<EgressProbeResultWireDTO>("egress probe", {
   status: isOneOf("unknown", "healthy", "unhealthy"), testedAt: isString, latencyMs: isNumber, exitIp: isOptional(isString), error: isOptional(isString), probeProvider: isOptional(isOneOf("ipinfo", "cloudflare")),
@@ -353,6 +384,36 @@ export function createEgressNode(input: EgressNodeInput): Promise<EgressNodeDTO>
 
 export function updateEgressNode(id: string, input: EgressNodeInput): Promise<EgressNodeDTO> {
   return apiRequest(`/api/admin/v1/egress-nodes/${id}`, { method: "PUT", body: input }, decodeEgressNode);
+}
+
+export function getEgressNodeProxyURL(id: string): Promise<{ proxyURL: string }> {
+  return apiRequest(`/api/admin/v1/egress-nodes/${id}/proxy-url/reveal`, { method: "POST" }, createObjectDecoder<{ proxyURL: string }>("egress proxy URL", { proxyURL: isString }));
+}
+
+export function listEgressProxyProfiles(input: { page?: number; pageSize?: number; search?: string } = {}): Promise<EgressProxyProfileListDTO> {
+	const query = new URLSearchParams({ page: String(input.page ?? 1), pageSize: String(input.pageSize ?? 20) });
+	if (input.search) query.set("search", input.search);
+	return apiRequest(`/api/admin/v1/egress-proxy-profiles?${query}`, {}, decodeEgressProxyProfiles);
+}
+
+export function createEgressProxyProfile(input: EgressProxyProfileInput): Promise<EgressProxyProfileDTO> {
+  return apiRequest("/api/admin/v1/egress-proxy-profiles", { method: "POST", body: input }, decodeEgressProxyProfile);
+}
+
+export function getEgressProxyProfile(id: string): Promise<EgressProxyProfileDTO> {
+	return apiRequest(`/api/admin/v1/egress-proxy-profiles/${id}`, {}, decodeEgressProxyProfile);
+}
+
+export function updateEgressProxyProfile(id: string, input: EgressProxyProfileInput): Promise<EgressProxyProfileDTO> {
+  return apiRequest(`/api/admin/v1/egress-proxy-profiles/${id}`, { method: "PUT", body: input }, decodeEgressProxyProfile);
+}
+
+export function deleteEgressProxyProfile(id: string): Promise<{ deleted: boolean }> {
+  return apiRequest(`/api/admin/v1/egress-proxy-profiles/${id}`, { method: "DELETE" }, decodeBooleanResult<{ deleted: boolean }>("deleted"));
+}
+
+export function getEgressProxyProfileURL(id: string): Promise<{ proxyURL: string }> {
+  return apiRequest(`/api/admin/v1/egress-proxy-profiles/${id}/proxy-url/reveal`, { method: "POST" }, createObjectDecoder<{ proxyURL: string }>("egress proxy profile URL", { proxyURL: isString }));
 }
 
 export function deleteEgressNode(id: string): Promise<{ deleted: boolean }> {
@@ -428,7 +489,7 @@ export function getEgressOperationsConfig(): Promise<EgressOperationsConfigDTO> 
   return apiRequest("/api/admin/v1/egress-operations", {}, decodeEgressOperationsConfig);
 }
 
-export function updateEgressOperationsConfig(input: EgressOperationsConfigInput): Promise<EgressOperationsConfigDTO> {
+export function updateEgressOperationsConfig(input: Omit<EgressOperationsConfigDTO, "updatedAt">): Promise<EgressOperationsConfigDTO> {
   return apiRequest("/api/admin/v1/egress-operations", { method: "PUT", body: input }, decodeEgressOperationsConfig);
 }
 
