@@ -1,4 +1,5 @@
 import { runtimeConfig } from "@/shared/config/runtime-config";
+import { serverImageURL } from "@/shared/lib/server-media-url";
 
 export type ChatMessage = {
   role: "system" | "user" | "assistant";
@@ -278,7 +279,7 @@ export async function synthesizeSpeech(input: {
   speed?: number;
   signal?: AbortSignal;
 }): Promise<TTSResult> {
-  const response = await fetch("/v1/tts", {
+  const response = await fetch(`${runtimeConfig.apiBaseUrl}/v1/tts`, {
     method: "POST",
     headers: new Headers({
       Accept: "application/json, audio/*",
@@ -332,7 +333,7 @@ export async function transcribeSpeech(input: {
   if (input.language) form.append("language", input.language);
   form.append("format", "true");
   form.append("file", input.file, input.file.name);
-  const response = await fetch("/v1/stt", {
+  const response = await fetch(`${runtimeConfig.apiBaseUrl}/v1/stt`, {
     method: "POST",
     headers: new Headers({ Accept: "application/json", Authorization: `Bearer ${input.apiKey}` }),
     body: form,
@@ -528,10 +529,9 @@ function resolveMediaURL(value: string): string {
   if (!url || url.startsWith("data:") || url.startsWith("blob:")) return url;
   try {
     const browserOrigin = typeof window === "undefined" ? "http://localhost" : window.location.origin;
+    const media = serverImageURL(url, runtimeConfig.apiBaseUrl, browserOrigin);
+    if (media) return media;
     const resolved = new URL(url, `${browserOrigin}/`);
-    if (resolved.pathname.startsWith("/v1/media/images/")) {
-      return `${resolved.pathname}${resolved.search}${resolved.hash}`;
-    }
     return resolved.origin === browserOrigin ? `${resolved.pathname}${resolved.search}${resolved.hash}` : resolved.toString();
   } catch {
     return url;

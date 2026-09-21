@@ -392,7 +392,7 @@ identity automatically:
 ```yaml
 qualityGuard:
   enabled: true
-  model: "grok-4.6"
+  model: "grok-4.7"
   # Withhold thinking-model streams that have no streamed reasoning.
   # Observe for up to 30s. A stub plus enough visible output at the deadline
   # is withheld; empty stub-only streams keep waiting. Floor-met dumps that

@@ -359,7 +359,7 @@ Hysteria 与 TUIC 暂未支持。FlareSolverr 仅接受 HTTP/SOCKS 代理地址�
 ```yaml
 qualityGuard:
   enabled: true
-  model: "grok-4.6"
+  model: "grok-4.7"
   # 思考模型缺流式 reasoning 时先扣住响应，换号再打，不把降智正文发给用户。
   # 最多观察 30 秒；stub 加上足够可见输出在超时后扣住（TUI 30s 后的短问候），
   # 空 stub 继续等。floor 已达标但 1 秒内吐短回复的也扣。
