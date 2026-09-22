@@ -392,11 +392,10 @@ identity automatically:
 ```yaml
 qualityGuard:
   enabled: true
-  model: "grok-4.6"
-  # Withhold thinking-model streams that have no streamed reasoning.
-  # Observe for up to 30s. A stub plus enough visible output at the deadline
-  # is withheld; empty stub-only streams keep waiting. Floor-met dumps that
-  # flush a short greeting in under 1s are also withheld.
+  model: "grok-4.7"
+  # Optionally check completed text-only responses for requested reasoning.
+  # Reasoning and tool output release immediately; after 30s visible output
+  # is released. Empty streams remain subject to the provider idle timeout.
   requestRetry:
     enabled: true
     maxAttempts: 6
@@ -407,7 +406,7 @@ qualityGuard:
     idleAccountCooldown: 15m
 ```
 
-`requestRetry` runs on the gateway request path and is independent of the sidecar. `config.example.yaml` keeps `enabled: false`; set it true to intercept. When enabled, a thinking-model stream with enough visible output and no streamed reasoning is **not delivered**; replay-safe stateless requests may try another account. TUI follow-ups (`previous_response_id`) and hosted-tool turns are still held for classification, but a quality withhold never replays account-bound state or side-effecting tools across accounts; `onExhausted` returns `503 quality_degraded` or releases that held body. Context compaction, image, video, and ForcedEgress probe requests are unchanged.
+`requestRetry` runs on the gateway request path and is independent of the sidecar. `config.example.yaml` keeps `enabled: false`; set it true to check completed text-only responses that lack requested reasoning. Reasoning summaries, opaque reasoning above the fixed stub limit, and tool calls release the held prefix immediately. Arrival speed, token ratios and ciphertext bytes per token are not quality tests. Explicit upstream failures pass through without becoming missing-thinking strikes, and usage-only empty responses remain errors. At the hold deadline, visible output is released rather than judging unfinished metadata. Only replay-safe stateless requests may try another account after a completed response fails the optional check; account-bound state and side-effecting hosted tools are never replayed. `onExhausted` returns `503 quality_degraded` or releases that held body. Context compaction, image, video, and ForcedEgress probes stay exempt.
 
 ```bash
 docker compose --profile quality-guard up -d --build
@@ -558,3 +557,7 @@ make swagger
 - [简体中文 README](./README.zh-CN.md)
 - [Backend guide](./backend/README.md)
 - [Frontend guide](./frontend/README.md)
+
+## Production server policy / 生产服务器约束
+
+This deployment uses GitHub-hosted CI only. Do not install dependencies or build on the production server; see [AGENTS.md](AGENTS.md) and [deployment policy](DEPLOYMENT.zh-CN.md).

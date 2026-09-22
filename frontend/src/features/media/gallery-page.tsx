@@ -15,6 +15,7 @@ import { ErrorState } from "@/shared/components/data-state";
 import { DataTableShell } from "@/shared/components/data-table-shell";
 import { PageHeader } from "@/shared/components/page-header";
 import { Pagination } from "@/shared/components/pagination";
+import { runtimeConfig } from "@/shared/config/runtime-config";
 import { useDebouncedValue } from "@/shared/hooks/use-debounced-value";
 import { cn } from "@/shared/lib/cn";
 import { formatDateTime, formatNumber } from "@/shared/lib/format";
@@ -175,7 +176,7 @@ export function GalleryPage() {
 function ImageCard({ image, locale, selectionMode, selected, onSelectedChange }: { image: MediaAssetDTO; locale: string; selectionMode: boolean; selected: boolean; onSelectedChange: (checked: boolean) => void }) {
   const { t } = useTranslation();
   // 管理端图库与 API 同源，使用相对路径避免依赖未配置或仅对外可用的公共地址。
-  const imageURL = `/v1/media/images/${encodeURIComponent(image.id)}`;
+  const imageURL = `${runtimeConfig.apiBaseUrl}/v1/media/images/${encodeURIComponent(image.id)}`;
   return (
     <article className="group relative min-w-0 [content-visibility:auto] [contain-intrinsic-size:0_280px]">
       <Checkbox
