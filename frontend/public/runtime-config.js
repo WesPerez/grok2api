@@ -1,4 +1,4 @@
 window.__GROK2API_RUNTIME_CONFIG__ = {
-  apiBaseUrl: "",
-  publicApiBaseUrl: ""
+  apiBaseUrl: "/grok2api",
+  publicApiBaseUrl: "/grok2api"
 };

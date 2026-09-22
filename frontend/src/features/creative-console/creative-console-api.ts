@@ -1,3 +1,6 @@
+import { runtimeConfig } from "@/shared/config/runtime-config";
+import { serverMediaURL } from "@/shared/lib/server-media-url";
+
 export type ChatMessage = {
   role: "system" | "user" | "assistant";
   content: string;
@@ -276,7 +279,7 @@ export async function synthesizeSpeech(input: {
   speed?: number;
   signal?: AbortSignal;
 }): Promise<TTSResult> {
-  const response = await fetch("/v1/tts", {
+  const response = await fetch(`${runtimeConfig.apiBaseUrl}/v1/tts`, {
     method: "POST",
     headers: new Headers({
       Accept: "application/json, audio/*",
@@ -330,7 +333,7 @@ export async function transcribeSpeech(input: {
   if (input.language) form.append("language", input.language);
   form.append("format", "true");
   form.append("file", input.file, input.file.name);
-  const response = await fetch("/v1/stt", {
+  const response = await fetch(`${runtimeConfig.apiBaseUrl}/v1/stt`, {
     method: "POST",
     headers: new Headers({ Accept: "application/json", Authorization: `Bearer ${input.apiKey}` }),
     body: form,
@@ -371,7 +374,7 @@ async function publicApiRequest(apiKey: string, path: string, options: RequestOp
     headers.set("Content-Type", "application/json");
     body = JSON.stringify(options.body);
   }
-  const response = await fetch(`/v1${path}`, {
+  const response = await fetch(`${runtimeConfig.apiBaseUrl}/v1${path}`, {
     method: options.method ?? "GET",
     headers,
     body,
@@ -396,7 +399,7 @@ async function publicApiRequest(apiKey: string, path: string, options: RequestOp
 }
 
 async function publicResponsesStream(apiKey: string, body: Record<string, unknown>, onUpdate?: (snapshot: ChatStreamSnapshot) => void, signal?: AbortSignal): Promise<ChatResponseResult> {
-  const response = await fetch("/v1/responses", {
+  const response = await fetch(`${runtimeConfig.apiBaseUrl}/v1/responses`, {
     method: "POST",
     headers: new Headers({ Accept: "text/event-stream", Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" }),
     body: JSON.stringify(body),
@@ -526,10 +529,9 @@ function resolveMediaURL(value: string): string {
   if (!url || url.startsWith("data:") || url.startsWith("blob:")) return url;
   try {
     const browserOrigin = typeof window === "undefined" ? "http://localhost" : window.location.origin;
+    const media = serverMediaURL(url, runtimeConfig.apiBaseUrl, browserOrigin);
+    if (media) return media;
     const resolved = new URL(url, `${browserOrigin}/`);
-    if (resolved.pathname.startsWith("/v1/media/images/")) {
-      return `${resolved.pathname}${resolved.search}${resolved.hash}`;
-    }
     return resolved.origin === browserOrigin ? `${resolved.pathname}${resolved.search}${resolved.hash}` : resolved.toString();
   } catch {
     return url;
