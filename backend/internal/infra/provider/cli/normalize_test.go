@@ -54,6 +54,8 @@ func TestNormalizeBuildReasoningEffort(t *testing.T) {
 		{name: "multi-agent uppercase xhigh", model: "grok-4.20-multi-agent-0309", effort: "XHIGH", want: "xhigh"},
 		{name: "multi-agent max maps to highest supported effort", model: "grok-4.20-multi-agent-0309", effort: "max", want: "xhigh"},
 		{name: "4.6 xhigh", model: "grok-4.6", effort: "xhigh", want: "xhigh"},
+		{name: "4.7 xhigh", model: "grok-4.7", effort: "xhigh", want: "xhigh"},
+		{name: "4.7 max maps to xhigh", model: "Build/grok-4.7", effort: "max", want: "xhigh"},
 		{name: "4.6 uppercase xhigh", model: "grok-4.6", effort: "XHIGH", want: "xhigh"},
 		{name: "4.6 max maps to xhigh", model: "grok-4.6", effort: "max", want: "xhigh"},
 		{name: "prefixed 4.6 uppercase max maps to xhigh", model: "Build/grok-4.6", effort: "MAX", want: "xhigh"},

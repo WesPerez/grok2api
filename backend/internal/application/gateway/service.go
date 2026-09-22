@@ -1020,6 +1020,9 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 	// nor new evidence and can multiply a slow/failing probe.
 	holdCfg := s.qualityRetryConfig()
 	qualityHoldEnabled := shouldHoldQualityStream(input, ownership, route, operation, holdCfg)
+	if qualityHoldEnabled {
+		holdCfg.toolResultContinuation = qualityRequestEndsWithToolResult(input.Body)
+	}
 	qualityCrossAccountReplay := canReplayQualityHoldAcrossAccounts(input, ownership)
 	attemptPolicy := newRequestRoutingAttemptPolicy(int(s.maxAttempts.Load()), ownership != nil || input.ForcedAccountID != 0)
 	idempotencyID, _ := security.NewOpaqueToken(18)

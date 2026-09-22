@@ -42,7 +42,7 @@ func TestEstimateOfficialCostMatchesControlledModelFamilies(t *testing.T) {
 			t.Fatalf("EstimateOfficialCost(%q) = %#v, %v", test.model, result, ok)
 		}
 	}
-	for _, model := range []string{"my-grok-4.5", "Other/grok-4.5", "grok-4.50", "grok-4.5/preview"} {
+	for _, model := range []string{"my-grok-4.5", "Other/grok-4.5", "grok-4.50", "grok-4.70", "grok-4.5/preview"} {
 		if result, ok := EstimateOfficialCost(model, 100, 0, 50, 100); ok {
 			t.Fatalf("unsafe model %q was priced as %#v", model, result)
 		}
@@ -55,6 +55,7 @@ func TestOfficialPricingMatchesPublishedTokenRates(t *testing.T) {
 		inputCost, cachedCost, outputCost int64
 	}{
 		{model: "grok-build-0.1", inputCost: 10_000_000_000, cachedCost: 2_000_000_000, outputCost: 20_000_000_000},
+		{model: "grok-4.7", inputCost: 20_000_000_000, cachedCost: 5_000_000_000, outputCost: 60_000_000_000},
 		{model: "grok-4.6", inputCost: 20_000_000_000, cachedCost: 5_000_000_000, outputCost: 60_000_000_000},
 		{model: "grok-4.5", inputCost: 20_000_000_000, cachedCost: 3_000_000_000, outputCost: 60_000_000_000},
 		{model: "grok-4.3", inputCost: 12_500_000_000, cachedCost: 2_000_000_000, outputCost: 25_000_000_000},

@@ -129,7 +129,7 @@ qualityGuard:
   enabled: false
   # 主程序会自动创建并复用不可导出的内部探测身份，无需配置 Client Key。
   # 使用已验证会输出推理 Token 的 Build 模型时，内置恢复探针还会校验 reasoning Token。
-  model: "grok-4.6"
+  model: "grok-4.7"
   mode: hybrid # passive | active | hybrid
   activeInterval: 30m
   passivePollInterval: 5s
@@ -152,18 +152,17 @@ qualityGuard:
   # Optional request-path withhold/retry for thinking models.
   # Recommended lab values are filled in; enabled stays false so stock
   # installs do not intercept. Set enabled: true to turn the hold on.
-  # Observe up to 30s for real reasoning evidence. A reasoning-item stub plus
-  # enough visible output at the deadline is withheld (TUI dump after 30s),
-  # not released as late ciphertext. Empty stub-only streams keep waiting.
-  # Floor-met ciphertext that then dumps a short greeting in under 1s is
-  # also withheld. TUI follow-ups (previous_response_id) and hosted tools
-  # stay held for classification, but a quality withhold never replays
-  # account-bound state or side-effecting tools. Context compaction stays exempt.
+  # Observe up to 30s for reasoning or tool output. Only completed text-only
+  # responses without the requested reasoning can be withheld. The deadline
+  # releases visible output while empty streams retain the provider idle limit.
+  # Arrival speed and token ratios do not establish reasoning quality.
+  # Account-bound follow-ups (previous_response_id) and side-effecting hosted
+  # tools are never replayed across accounts. Context compaction stays exempt.
   # Replay-safe missing-thinking requests try another account (up to
   # maxAttempts). fail_closed returns 503 instead of the held body. Sidecar
   # qualityGuard.enabled stays false until you start the quality-guard profile.
-  # Non-empty encrypted_content stubs are not thinking. The ciphertext floor
-  # is max(minEncryptedBytes, reasoning_tokens * encryptedBytesPerReasoningToken).
+  # The optional ciphertext check uses a fixed small-stub limit. It cannot
+  # establish the authenticity or quality of opaque reasoning.
   requestRetry:
     enabled: false
     maxAttempts: 6
@@ -178,4 +177,3 @@ qualityGuard:
     # clear cooldown — use POST /api/admin/v1/accounts/:id/clear-cooldown.
     idleAccountCooldown: 15m
     minEncryptedBytes: 256
-    encryptedBytesPerReasoningToken: 4
