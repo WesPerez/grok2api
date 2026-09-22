@@ -18,6 +18,17 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  CI_FALLBACK_CONTRACT: '1'
+  CI_FALLBACK_PR_SKIPPED_JOBS: '["build_ghcr_image", "merge"]'
+  CI_FALLBACK_SKIP_RULES: >-
+    [{"event":"push","jobs":["check_ghcr_image"]},
+     {"event":"workflow_dispatch","refs":["refs/heads/main"],"jobs":["check_ghcr_image"]},
+     {"event":"workflow_dispatch","except_refs":["refs/heads/main"],"jobs":["build_ghcr_image","merge"]}]
+  SOURCE_REPOSITORY: ${{ vars.CI_PRIMARY_REPOSITORY || github.repository }}
+  SOURCE_REF: ${{ vars.CI_SOURCE_REF || github.ref }}
+  SOURCE_REF_NAME: ${{ vars.CI_SOURCE_REF_NAME || github.ref_name }}
+
 jobs:
   verify:
     name: Verify
@@ -75,7 +86,7 @@ jobs:
 
   check_ghcr_image:
     name: Build image (${{ matrix.arch }})
-    if: github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')
+    if: (vars.CI_SOURCE_EVENT || github.event_name) == 'pull_request' || ((vars.CI_SOURCE_EVENT || github.event_name) == 'workflow_dispatch' && (vars.CI_SOURCE_REF || github.ref) != 'refs/heads/main')
     needs: verify
     strategy:
       fail-fast: false
@@ -109,7 +120,7 @@ jobs:
 
   build_ghcr_image:
     name: Publish image (${{ matrix.arch }})
-    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
+    if: (vars.CI_SOURCE_EVENT || github.event_name) == 'push' || ((vars.CI_SOURCE_EVENT || github.event_name) == 'workflow_dispatch' && (vars.CI_SOURCE_REF || github.ref) == 'refs/heads/main')
     needs: verify
     permissions:
       contents: read
@@ -137,7 +148,7 @@ jobs:
         id: image
         shell: bash
         run: |
-          image_name=$(printf '%s' "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')
+          image_name=$(printf '%s' "$SOURCE_REPOSITORY" | tr '[:upper:]' '[:lower:]')
           echo "name=ghcr.io/$image_name" >> "$GITHUB_OUTPUT"
 
       - name: Docker metadata
@@ -146,17 +157,19 @@ jobs:
         with:
           images: ${{ steps.image.outputs.name }}
           tags: |
-            type=ref,event=branch,suffix=-${{ matrix.arch }}
+            type=raw,value=${{ env.SOURCE_REF_NAME }},suffix=-${{ matrix.arch }}
             type=sha,format=long,prefix=sha-,suffix=-${{ matrix.arch }}
-            type=ref,event=tag,suffix=-${{ matrix.arch }}
-            type=raw,value=latest-${{ matrix.arch }},enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=latest-${{ matrix.arch }},enable=${{ env.SOURCE_REF == 'refs/heads/main' }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ env.SOURCE_REPOSITORY }}
+            org.opencontainers.image.revision=${{ github.sha }}
 
       - name: Login to GHCR
         uses: docker/login-action@v4
         with:
           registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          username: ${{ vars.CI_PRIMARY_OWNER || github.repository_owner }}
+          password: ${{ secrets.CI_PUBLISH_TOKEN || secrets.GITHUB_TOKEN }}
 
       - name: Build and publish
         uses: docker/build-push-action@v6
@@ -174,7 +187,7 @@ jobs:
 
   merge:
     name: Merge image
-    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
+    if: (vars.CI_SOURCE_EVENT || github.event_name) == 'push' || ((vars.CI_SOURCE_EVENT || github.event_name) == 'workflow_dispatch' && (vars.CI_SOURCE_REF || github.ref) == 'refs/heads/main')
     needs:
       - build_ghcr_image
     runs-on: ubuntu-latest
@@ -190,7 +203,7 @@ jobs:
         id: image
         shell: bash
         run: |
-          image_name=$(printf '%s' "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')
+          image_name=$(printf '%s' "$SOURCE_REPOSITORY" | tr '[:upper:]' '[:lower:]')
           echo "name=ghcr.io/$image_name" >> "$GITHUB_OUTPUT"
 
       - name: Docker metadata
@@ -199,17 +212,16 @@ jobs:
         with:
           images: ${{ steps.image.outputs.name }}
           tags: |
-            type=ref,event=branch
+            type=raw,value=${{ env.SOURCE_REF_NAME }}
             type=sha,format=long,prefix=sha-
-            type=ref,event=tag
-            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=latest,enable=${{ env.SOURCE_REF == 'refs/heads/main' }}
 
       - name: Login to GHCR
         uses: docker/login-action@v4
         with:
           registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          username: ${{ vars.CI_PRIMARY_OWNER || github.repository_owner }}
+          password: ${{ secrets.CI_PUBLISH_TOKEN || secrets.GITHUB_TOKEN }}
 
       - name: Create manifest list
         shell: bash
@@ -223,3 +235,23 @@ jobs:
 
       - name: Inspect image
         run: docker buildx imagetools inspect "${{ steps.image.outputs.name }}:${{ steps.meta.outputs.version }}"
+
+      - name: Record published image
+        env:
+          IMAGE_NAME: ${{ steps.image.outputs.name }}
+        run: |
+          docker buildx imagetools inspect "${IMAGE_NAME}:sha-${GITHUB_SHA}" --format '{{json .Manifest}}' > image-manifest.json
+          python3 - <<'PY'
+          import json, os, re
+          manifest = json.load(open('image-manifest.json'))
+          digest = manifest['digest']
+          assert re.fullmatch(r'sha256:[0-9a-f]{64}', digest)
+          with open('image-metadata.json', 'w') as output:
+              json.dump({'repository': os.environ['SOURCE_REPOSITORY'], 'revision': os.environ['GITHUB_SHA'], 'image': os.environ['IMAGE_NAME'], 'digest': digest}, output)
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: image-metadata
+          path: image-metadata.json
+          if-no-files-found: error
