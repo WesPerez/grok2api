@@ -359,7 +359,7 @@ func observeQualityResponses(state *qualityScanState, payload []byte) {
 	switch event.Type {
 	case "response.completed":
 		state.terminal = true
-	case "response.incomplete", "response.failed", "error":
+	case "response.incomplete", "response.failed", "response.error", "error":
 		state.terminal = true
 		state.terminalFailure = true
 	case "response.reasoning_text.delta", "response.reasoning_summary_text.delta":

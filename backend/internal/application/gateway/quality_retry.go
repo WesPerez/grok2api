@@ -141,14 +141,9 @@ func ClassifyQualityHold(sig QualityStreamSignals, minOutput int64) QualityVerdi
 	if sig.TerminalFailure || sig.HasThinking || sig.HasReasoningDelta || sig.HasToolCall {
 		return QualityDeliver
 	}
-	// Prefer observed/derived visible output. Total output includes reasoning
-	// tokens, which are deliberately not trusted as quality evidence above. If
-	// the stream exposed no visible count at all, retain OutputTokens as a
-	// compatibility fallback for terminal usage-only responses.
+	// Only actual visible content counts. Usage-only responses are handled as
+	// empty streams by finishQualityPeek, not as missing-reasoning strikes.
 	output := sig.VisibleTokens
-	if output <= 0 {
-		output = sig.OutputTokens
-	}
 	if sig.Terminal {
 		if output <= 0 {
 			return QualityWait

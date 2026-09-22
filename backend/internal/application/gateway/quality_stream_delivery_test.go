@@ -123,6 +123,10 @@ func TestQualityDeliveryIndependentOfReadBoundaries(t *testing.T) {
 			frames: []string{`data: {"type":"response.failed","response":{"error":{"code":"upstream_unavailable"}}}`},
 		},
 		{
+			name: "response error event", protocol: qualityProtocolResponses, verdict: QualityDeliver,
+			frames: []string{`data: {"type":"response.error","error":{"code":"upstream_unavailable","message":"unavailable"}}`},
+		},
+		{
 			name: "upstream incomplete", protocol: qualityProtocolResponses, verdict: QualityDeliver,
 			frames: []string{`data: {"type":"response.incomplete","response":{"incomplete_details":{"reason":"max_output_tokens"}}}`},
 		},
