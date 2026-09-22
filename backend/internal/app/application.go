@@ -492,15 +492,14 @@ func accountAutoCleanConfig(value config.AccountsConfig) accountapp.AutoCleanCon
 
 func qualityRetryRuntime(value config.QualityGuardRequestRetryConfig) gateway.QualityRetryRuntime {
 	return gateway.QualityRetryRuntime{
-		Enabled:                         value.Enabled,
-		MaxAttempts:                     value.MaxAttempts,
-		HoldTimeout:                     value.HoldTimeout.Value(),
-		MinOutputTokens:                 int64(value.MinOutputTokens),
-		OnExhausted:                     value.OnExhausted,
-		AccountCooldown:                 value.AccountCooldown.Value(),
-		IdleAccountCooldown:             value.IdleAccountCooldown.Value(),
-		MinEncryptedBytes:               value.MinEncryptedBytes,
-		EncryptedBytesPerReasoningToken: value.EncryptedBytesPerReasoningToken,
+		Enabled:             value.Enabled,
+		MaxAttempts:         value.MaxAttempts,
+		HoldTimeout:         value.HoldTimeout.Value(),
+		MinOutputTokens:     int64(value.MinOutputTokens),
+		OnExhausted:         value.OnExhausted,
+		AccountCooldown:     value.AccountCooldown.Value(),
+		IdleAccountCooldown: value.IdleAccountCooldown.Value(),
+		MinEncryptedBytes:   value.MinEncryptedBytes,
 	}
 }
 

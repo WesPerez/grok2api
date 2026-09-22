@@ -1200,15 +1200,20 @@ func TestCopyStreamDoesNotAppendAbortAfterUpstreamFailureTerminal(t *testing.T) 
 
 func TestCopyStreamWritesTerminalOnIncompleteEOF(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	recorder := httptest.NewRecorder()
-	context, _ := gin.CreateTestContext(recorder)
-	_, err := copyStreamWithFallbackModel(context.Writer, strings.NewReader(""), streamProtocolResponses, nil, "grok-test")
-	if !errors.Is(err, errUpstreamStreamIncomplete) {
-		t.Fatalf("copy error = %v", err)
-	}
-	got := recorder.Body.String()
-	if !strings.Contains(got, `"type":"response.failed"`) || !strings.Contains(got, `"code":"server_error"`) || !strings.Contains(got, `"message":"upstream_stream_incomplete:`) || !strings.Contains(got, `"model":"grok-test"`) {
-		t.Fatalf("incomplete EOF missing terminal SSE event: %q", got)
+	for _, body := range []string{
+		"",
+		`data: {"type":"response.output_text.delta","delta":"` + strings.Repeat("unfinished ", 40) + `"}` + "\n\n",
+	} {
+		recorder := httptest.NewRecorder()
+		context, _ := gin.CreateTestContext(recorder)
+		_, err := copyStreamWithFallbackModel(context.Writer, strings.NewReader(body), streamProtocolResponses, nil, "grok-test")
+		if !errors.Is(err, errUpstreamStreamIncomplete) {
+			t.Fatalf("copy error = %v", err)
+		}
+		got := recorder.Body.String()
+		if strings.Count(got, `"type":"response.failed"`) != 1 || !strings.Contains(got, `"code":"server_error"`) || !strings.Contains(got, `"message":"upstream_stream_incomplete:`) || !strings.Contains(got, `"model":"grok-test"`) {
+			t.Fatalf("incomplete EOF missing terminal SSE event: %q", got)
+		}
 	}
 }
 
