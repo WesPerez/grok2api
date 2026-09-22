@@ -185,11 +185,22 @@ def main():
     actual = json.loads(call["arguments"])
     matches = {name: actual.get(name) == value for name, value in expected.items()}
     delta_match = deltas.get(call.get("id", "")) == call["arguments"]
-    report({"tool_argument_matches": matches, "delta_matches_final_arguments": delta_match})
-    if actual != expected or not delta_match:
-        raise RuntimeError("tool arguments were not preserved exactly")
+    differences = {}
+    for name, value in expected.items():
+        observed = actual.get(name)
+        if isinstance(observed, str) and observed != value:
+            index = next((i for i, (a, b) in enumerate(zip(value, observed)) if a != b),
+                         min(len(value), len(observed)))
+            differences[name] = {
+                "expected_length": len(value), "actual_length": len(observed), "index": index,
+                "expected_character": repr(value[index:index + 1]),
+                "actual_character": repr(observed[index:index + 1]),
+            }
+    copy_exact = actual == expected and delta_match
+    report({"tool_argument_matches": matches, "delta_matches_final_arguments": delta_match,
+            "synthetic_argument_differences": differences})
     digest = hashlib.sha256(json.dumps(actual, ensure_ascii=False, sort_keys=True).encode()).hexdigest()[:16]
-    result = {"verified": True, "digest": digest}
+    result = {"verified": copy_exact, "digest": digest}
     second_output, _ = run_request(url, key, {
         **common,
         "input": original_input + output + [{
@@ -202,9 +213,12 @@ def main():
                          if item.get("type") == "message" for part in item.get("content", [])
                          if part.get("type") == "output_text")
     passed = digest in final_text and "CHAIN_OK" in final_text
-    report({"tool_result_consumed": passed, "trace": trace})
+    report({"tool_result_consumed": passed, "arguments_copied_exactly": copy_exact,
+            "passed": passed and copy_exact, "trace": trace})
     if not passed:
         raise RuntimeError("the final answer did not consume the tool result")
+    if not copy_exact:
+        raise RuntimeError("tool round trip completed, but synthetic arguments were not copied exactly")
 
 
 if __name__ == "__main__":

@@ -1061,8 +1061,8 @@ func TestPeekQualityStreamProcessesUnterminatedFinalEvent(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer replay.Close()
-	if verdict != QualityDeliver {
-		t.Fatalf("verdict = %s, want deliver for a real short response", verdict)
+	if verdict != QualityWait {
+		t.Fatalf("verdict = %s, want incomplete response left to transport", verdict)
 	}
 }
 
@@ -1260,6 +1260,7 @@ func TestAttemptLoopQualityHoldPreservesReplaySafety(t *testing.T) {
 		onExhausted string
 		wantError   bool
 		empty       bool
+		truncated   bool
 		wantMissing bool
 	}{
 		{
@@ -1289,6 +1290,12 @@ func TestAttemptLoopQualityHoldPreservesReplaySafety(t *testing.T) {
 			onExhausted: qualityRetryFailClosed,
 			wantError:   true,
 			empty:       true,
+		},
+		{
+			name:        "unexpected EOF is not missing reasoning or replayed",
+			body:        `{"model":"grok-4.6","input":"continue","stream":true}`,
+			onExhausted: qualityRetryFailClosed,
+			truncated:   true,
 		},
 	}
 	for _, test := range tests {
@@ -1362,6 +1369,9 @@ func TestAttemptLoopQualityHoldPreservesReplaySafety(t *testing.T) {
 			if test.empty {
 				firstBody = ""
 			}
+			if test.truncated {
+				firstBody = sse(`data: {"type":"response.output_text.delta","delta":"` + strings.Repeat("bad ", 40) + `"}`)
+			}
 			adapter := &scriptedBuildAdapter{responses: map[uint64][]scriptedBuildResponse{
 				credentials[0].ID: {{status: http.StatusOK, body: firstBody}},
 				credentials[1].ID: {{status: http.StatusOK, body: thinking}},
@@ -1387,7 +1397,18 @@ func TestAttemptLoopQualityHoldPreservesReplaySafety(t *testing.T) {
 			var responseBody []byte
 			if result != nil {
 				responseBody, _ = io.ReadAll(result.Body)
-				result.Finalize(Usage{}, "", "")
+				finalError := ""
+				if test.truncated {
+					if string(responseBody) != firstBody {
+						t.Fatal("unfinished stream bytes were not preserved")
+					}
+					beforeFinalize, err := accountRepo.Get(ctx, credentials[0].ID)
+					if err != nil || beforeFinalize.CooldownUntil != nil || beforeFinalize.LastError == lastErrorMissingThinking {
+						t.Fatalf("quality hold penalized an unfinished stream: %#v, err=%v", beforeFinalize, err)
+					}
+					finalError = "upstream_stream_incomplete"
+				}
+				result.Finalize(Usage{}, "", finalError)
 				_ = result.Body.Close()
 			}
 			if (requestErr != nil) != test.wantError {
@@ -1404,8 +1425,17 @@ func TestAttemptLoopQualityHoldPreservesReplaySafety(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if cooled.CooldownUntil == nil || (test.wantMissing && cooled.LastError != lastErrorMissingThinking) {
+			if !test.truncated && (cooled.CooldownUntil == nil || (test.wantMissing && cooled.LastError != lastErrorMissingThinking)) {
 				t.Fatalf("degraded account was not penalized: %#v", cooled)
+			}
+			if test.truncated {
+				if cooled.LastError == lastErrorMissingThinking || (cooled.CooldownUntil != nil && time.Until(*cooled.CooldownUntil) >= time.Hour) {
+					t.Fatalf("unfinished stream received a missing-reasoning cooldown: %#v", cooled)
+				}
+				logs, total, err := auditRepo.List(ctx, 0, 10)
+				if err != nil || total != 1 || logs[0].ErrorCode != "upstream_stream_incomplete" || logs[0].StatusCode != http.StatusOK {
+					t.Fatalf("unfinished stream audit = %#v, total=%d, err=%v", logs, total, err)
+				}
 			}
 		})
 	}

@@ -589,7 +589,9 @@ func finishQualityPeek(held *bytes.Buffer, pump *qualityReadPump, state *quality
 		// trailing newline.
 		ObserveQualityChunk(state, []byte{'\n'})
 	}
-	state.terminal = true
+	// EOF is not a protocol completion. Preserve unfinished output for the
+	// transport's incomplete-stream handling instead of applying a missing-
+	// reasoning penalty to an interrupted response.
 	signals := state.signals()
 	if signals.TerminalFailure {
 		return newPrefixReplay(held, pump), QualityDeliver, state.usage, state.responseID, nil

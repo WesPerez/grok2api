@@ -143,6 +143,18 @@ func TestQualityDeliveryIndependentOfReadBoundaries(t *testing.T) {
 			frames: []string{`data: {"type":"response.completed","response":{"output":[],"usage":{"output_tokens":100}}}`},
 		},
 		{
+			name: "responses unexpected EOF after text", protocol: qualityProtocolResponses, verdict: QualityWait,
+			frames: []string{`data: {"type":"response.output_text.delta","delta":"` + longText + `"}`},
+		},
+		{
+			name: "chat unexpected EOF after text", protocol: qualityProtocolChat, verdict: QualityWait,
+			frames: []string{`data: {"choices":[{"delta":{"content":"` + longText + `"}}]}`},
+		},
+		{
+			name: "anthropic unexpected EOF after text", protocol: qualityProtocolAnthropic, verdict: QualityWait,
+			frames: []string{`data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"` + longText + `"}}`},
+		},
+		{
 			name: "terminal text without requested reasoning", protocol: qualityProtocolResponses, verdict: QualityWithhold,
 			frames: []string{
 				`data: {"type":"response.output_text.delta","delta":"` + longText + `"}`,
