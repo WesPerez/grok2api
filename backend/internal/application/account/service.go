@@ -97,7 +97,7 @@ const (
 	buildBotFlagCacheTTL            time.Duration = 30 * time.Second
 	linkedDeleteRuntimeCleanupLimit               = 3 * time.Second
 	// buildDetectModel 管理端「检测账号」固定使用的 Grok Build 模型。
-	buildDetectModel               = "grok-4.5"
+	buildDetectModel               = "grok-4.7"
 	buildDetectQuotaRecoveryPause  = 24 * time.Hour
 	buildDetectModelDeniedCooldown = 5 * time.Minute
 	// buildDetectPrompt 探测请求正文，仅用于验证凭据与上游可用性。
