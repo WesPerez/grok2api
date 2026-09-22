@@ -360,9 +360,9 @@ Hysteria 与 TUIC 暂未支持。FlareSolverr 仅接受 HTTP/SOCKS 代理地址�
 qualityGuard:
   enabled: true
   model: "grok-4.7"
-  # 思考模型缺流式 reasoning 时先扣住响应，换号再打，不把降智正文发给用户。
-  # 最多观察 30 秒；stub 加上足够可见输出在超时后扣住（TUI 30s 后的短问候），
-  # 空 stub 继续等。floor 已达标但 1 秒内吐短回复的也扣。
+  # 可选检查已完成的纯文本响应是否包含请求的推理。
+  # 推理或工具输出立即放行；30 秒后放行已有正文。
+  # 空流仍受 Provider 的语义空闲超时约束。
   requestRetry:
     enabled: true
     maxAttempts: 6
@@ -373,7 +373,7 @@ qualityGuard:
     idleAccountCooldown: 15m
 ```
 
-`requestRetry` 在网关请求路径上生效，与 sidecar 探测/隔离相互独立。`config.example.yaml` 里 `enabled` 仍为 false，打开后才拦截。开启后，可见输出达到 `minOutputTokens` 且全程无流式 reasoning 时**不发给用户**；只有可安全重放的无状态请求才会排除账号重试。TUI 续聊（`previous_response_id`）和 hosted tools 仍会进入 hold 检测，但质量拦截不会把账号绑定状态或有副作用的工具跨账号重放，最终按 `onExhausted` 返回 `503 quality_degraded` 或放出当前响应。上下文压缩、图片、视频和 ForcedEgress 探针不受影响。
+`requestRetry` 在网关请求路径上生效，与 sidecar 探测/隔离相互独立。`config.example.yaml` 默认关闭；开启后只检查已完成、达到文本阈值且没有请求推理的纯文本响应。推理摘要、达到固定小 stub 下限的密文推理和工具调用会立即放行；网络到达速度、Token 比例和每 Token 密文字节数不用于判断质量。明确的上游失败保留原始错误，不记为缺思考；只有 usage、没有实际输出的响应仍算空流。观察期限到达后放行已有正文，不根据尚未到齐的元数据处罚账号。只有可安全重放的无状态请求才会换号；账号绑定状态和有副作用的 hosted tools 不跨账号重放。最终按 `onExhausted` 返回 `503 quality_degraded` 或放出当前响应；上下文压缩、图片、视频和 ForcedEgress 探针保持豁免。
 
 ```bash
 docker compose --profile quality-guard up -d --build

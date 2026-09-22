@@ -33,9 +33,15 @@
 
 ## 质量保护
 
-使用上游原生 `qualityGuard.requestRetry`，显式启用、`maxAttempts: 6`、
-`onExhausted: fail_closed`。它在响应提交前检测缺失推理/空流并排除已试账号，保留上游对
-账号绑定状态及有副作用工具的重放限制。耗尽后返回明确错误，不交付异常响应。
+使用 `qualityGuard.requestRetry`，显式启用、`maxAttempts: 6`、`onExhausted: fail_closed`。
+2026-09-22 修正了将快速合包、高推理 Token 比例和密文长度比例当作质量异常的规则。
+相同 SSE 无论分包还是合包，推理摘要、密文和工具调用都按实际事件判定；工具调用不要求
+额外输出可见思考。只检查已完成的无推理纯文本，30 秒观察期限后放行已有正文；空流和
+明确上游错误独立处理，不混成 `missing_thinking`。保留账号绑定状态及有副作用工具的重放限制。
+
+本机 `providerBuild.streamIdleTimeout` 通过管理员运行设置从 `2m` 调整为 `5m`，
+支持 xhigh 的长推理间隔，并保持有界的语义空闲检测。设置写入数据库并热加载，
+不能只修改启动 YAML 后假定生效。
 
 旧的外置 `grok-quality-retry-proxy`、Sub2 `x-sub2-quality-retry` header override、
 Nginx 动态端口映射及本地 protected-retry middleware 均退役。Nginx 直接转发 18000。
@@ -52,5 +58,10 @@ Nginx 动态端口映射及本地 protected-retry middleware 均退役。Nginx �
 - Sub2 账号 2221 只映射完整名称 `grok-4.7`；通过管理员 API 更新以刷新调度缓存。
 - 逐层验证 Responses 普通/流式、工具往返、图片输入和真实模型归属；HTTP 200 中的 SSE
   `response.failed` 不算成功。Router 验收必须核对实际模型，不能把降级到其它模型当作 Grok 成功。
+
+`tools/smoke-grok-responses.py` 发送两轮无副作用的 Responses 请求，验证 Windows 路径、
+Unicode、反斜杠和换行的工具参数保真，以及模型是否消费工具返回值。它不会执行模型工具，
+不会自动重发，发现错误终态或实际模型不一致即失败。该工具属于原始 HTTP 协议验收；
+Codex 客户端验收需要另用真实客户端，并核对 Router 审计中的实际路由。
 
 官方能力和计价来源：https://docs.x.ai/developers/models/grok-4.7 。

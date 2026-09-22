@@ -298,9 +298,8 @@ type QualityGuardRequestRetryConfig struct {
 	AccountCooldown Duration `yaml:"accountCooldown"`
 	// IdleAccountCooldown cools an account after a truly empty upstream
 	// stream. Independent of accountCooldown (missing-thinking). Zero uses 15m.
-	IdleAccountCooldown             Duration `yaml:"idleAccountCooldown"`
-	MinEncryptedBytes               int      `yaml:"minEncryptedBytes"`
-	EncryptedBytesPerReasoningToken int      `yaml:"encryptedBytesPerReasoningToken"`
+	IdleAccountCooldown Duration `yaml:"idleAccountCooldown"`
+	MinEncryptedBytes   int      `yaml:"minEncryptedBytes"`
 }
 
 type ClientKeyDefaultsConfig struct {
@@ -818,9 +817,6 @@ func validateQualityGuardRequestRetry(value QualityGuardRequestRetryConfig) erro
 	if value.MinEncryptedBytes != 0 && (value.MinEncryptedBytes < 64 || value.MinEncryptedBytes > 4096) {
 		return errors.New("qualityGuard.requestRetry.minEncryptedBytes 必须在 64 到 4096 之间")
 	}
-	if value.EncryptedBytesPerReasoningToken != 0 && (value.EncryptedBytesPerReasoningToken < 1 || value.EncryptedBytesPerReasoningToken > 16) {
-		return errors.New("qualityGuard.requestRetry.encryptedBytesPerReasoningToken 必须在 1 到 16 之间")
-	}
 	return nil
 }
 
@@ -956,7 +952,7 @@ func defaultConfig() Config {
 			RequestRetry: QualityGuardRequestRetryConfig{
 				MaxAttempts: 6, HoldTimeout: Duration(30 * time.Second), MinOutputTokens: 8, OnExhausted: "fail_closed",
 				AccountCooldown: Duration(12 * time.Hour), IdleAccountCooldown: Duration(15 * time.Minute),
-				MinEncryptedBytes: 256, EncryptedBytesPerReasoningToken: 4,
+				MinEncryptedBytes: 256,
 			},
 		},
 		ClientKeyDefaults: ClientKeyDefaultsConfig{RPMLimit: clientkeydomain.DefaultRPMLimit, MaxConcurrent: clientkeydomain.DefaultMaxConcurrent},
