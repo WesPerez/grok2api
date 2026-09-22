@@ -33,6 +33,9 @@ func TestClassifyQualityHold(t *testing.T) {
 		want QualityVerdict
 	}{
 		{name: "thinking delivers", sig: QualityStreamSignals{HasThinking: true, HasReasoningDelta: true, VisibleTokens: 10}, want: QualityDeliver},
+		{name: "tool result answer needs no new reasoning", sig: QualityStreamSignals{ToolResultContinuation: true, VisibleTokens: 69, Terminal: true}, want: QualityDeliver},
+		{name: "tool result unfinished answer still waits", sig: QualityStreamSignals{ToolResultContinuation: true, VisibleTokens: 69}, want: QualityWait},
+		{name: "tool result empty answer still waits", sig: QualityStreamSignals{ToolResultContinuation: true, Terminal: true}, want: QualityWait},
 		{name: "usage reasoning tokens alone withhold", sig: QualityStreamSignals{ReasoningTokens: 40, VisibleTokens: 80, Terminal: true}, want: QualityWithhold},
 		{name: "visible 32 no think withhold", sig: QualityStreamSignals{VisibleTokens: 32, Terminal: true}, want: QualityWithhold},
 		{name: "usage-only waits for empty-stream handling", sig: QualityStreamSignals{OutputTokens: 40, Terminal: true}, want: QualityWait},
@@ -1177,7 +1180,7 @@ func TestShouldHoldQualityStreamGates(t *testing.T) {
 			request := input
 			request.Body = []byte(test.body)
 			if !shouldHoldQualityStream(request, nil, route, audit.OperationChat, cfg) {
-				t.Fatal("in-flight tool results must still be held so 0-thinking agent turns are classified")
+				t.Fatal("tool results must still be held for empty-stream and transport checks")
 			}
 		})
 	}
@@ -1252,6 +1255,44 @@ func TestCanReplayQualityHoldAcrossAccounts(t *testing.T) {
 	}
 }
 
+func TestQualityRequestEndsWithToolResult(t *testing.T) {
+	t.Parallel()
+	for _, kind := range []string{
+		"function_call_output", "custom_tool_call_output", "local_shell_call_output",
+		"shell_call_output", "apply_patch_call_output", "mcp_tool_call_output",
+		"tool_search_output", "computer_call_output", "tool_result",
+	} {
+		body := fmt.Sprintf(`{"input":[{"type":%q,"call_id":"call_1","output":"done"}]}`, kind)
+		if !qualityRequestEndsWithToolResult([]byte(body)) {
+			t.Errorf("tool-result continuation %q was not recognized", kind)
+		}
+	}
+	for _, test := range []struct {
+		name string
+		body string
+		want bool
+	}{
+		{name: "empty tool output still is a result", body: `{"input":[{"type":"function_call_output","call_id":"call_1","output":""}]}`, want: true},
+		{name: "chat tool result", body: `{"messages":[{"role":"tool","content":"done"}]}`, want: true},
+		{name: "legacy function result", body: `{"messages":[{"role":"function","content":"done"}]}`, want: true},
+		{name: "messages tool result", body: `{"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":"done"}]}]}`, want: true},
+		{name: "trailing control items", body: `{"input":[{"type":"function_call_output","output":"done"},{"type":"reasoning"},{"type":"additional_tools","tools":[]},{"role":"developer","content":"Use the result."}]}`, want: true},
+		{name: "later user request", body: `{"input":[{"type":"function_call_output","output":"done"},{"role":"user","content":"Solve a new problem."}]}`},
+		{name: "later user image", body: `{"messages":[{"role":"tool","content":"done"},{"role":"user","content":[{"type":"image_url","image_url":{"url":"test"}}]}]}`},
+		{name: "mixed user request and result", body: `{"messages":[{"role":"user","content":[{"type":"text","text":"Solve a new problem."},{"type":"tool_result","content":"done"}]}]}`},
+		{name: "assistant reply is a boundary", body: `{"input":[{"type":"function_call_output","output":"done"},{"role":"assistant","content":"All done."}]}`},
+		{name: "schema does not exempt", body: `{"tools":[{"type":"function","parameters":{"type":"function_call_output"}}],"input":"hello"}`},
+		{name: "nested user data does not exempt", body: `{"input":[{"role":"user","content":[{"type":"text","data":{"type":"tool_result"}}]}]}`},
+		{name: "invalid request", body: `{"input":`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := qualityRequestEndsWithToolResult([]byte(test.body)); got != test.want {
+				t.Fatalf("tool-result continuation = %t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
 func TestAttemptLoopQualityHoldPreservesReplaySafety(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -1262,40 +1303,69 @@ func TestAttemptLoopQualityHoldPreservesReplaySafety(t *testing.T) {
 		empty       bool
 		truncated   bool
 		wantMissing bool
+		wantClean   bool
 	}{
 		{
 			name:        "previous response remains account bound",
 			previous:    true,
-			body:        `{"model":"grok-4.6","previous_response_id":"resp-root","input":"continue","stream":true}`,
+			body:        `{"model":"grok-4.7","previous_response_id":"resp-root","input":"continue","stream":true}`,
 			onExhausted: qualityRetryFailClosed,
 			wantError:   true,
 			wantMissing: true,
 		},
 		{
 			name:        "hosted tool fail closed executes once",
-			body:        `{"model":"grok-4.6","tools":[{"type":"web_search"}],"input":"search","stream":true}`,
+			body:        `{"model":"grok-4.7","tools":[{"type":"web_search"}],"input":"search","stream":true}`,
 			onExhausted: qualityRetryFailClosed,
 			wantError:   true,
 			wantMissing: true,
 		},
 		{
 			name:        "hosted tool fail open delivers same attempt",
-			body:        `{"model":"grok-4.6","tools":[{"type":"web_search"}],"input":"search","stream":true}`,
+			body:        `{"model":"grok-4.7","tools":[{"type":"web_search"}],"input":"search","stream":true}`,
 			onExhausted: qualityRetryFailOpen,
 			wantMissing: true,
 		},
 		{
 			name:        "hosted tool empty stream executes once",
-			body:        `{"model":"grok-4.6","tools":[{"type":"web_search"}],"input":"search","stream":true}`,
+			body:        `{"model":"grok-4.7","tools":[{"type":"web_search"}],"input":"search","stream":true}`,
 			onExhausted: qualityRetryFailClosed,
 			wantError:   true,
 			empty:       true,
 		},
 		{
 			name:        "unexpected EOF is not missing reasoning or replayed",
-			body:        `{"model":"grok-4.6","input":"continue","stream":true}`,
+			body:        `{"model":"grok-4.7","input":"continue","stream":true}`,
 			onExhausted: qualityRetryFailClosed,
 			truncated:   true,
+		},
+		{
+			name:        "tool result final answer needs no new reasoning",
+			body:        `{"model":"grok-4.7","input":[{"type":"function_call_output","call_id":"call_1","output":"done"}],"stream":true}`,
+			onExhausted: qualityRetryFailClosed,
+			wantClean:   true,
+		},
+		{
+			name:        "custom tool result keeps stored response owner",
+			previous:    true,
+			body:        `{"model":"grok-4.7","previous_response_id":"resp-root","input":[{"type":"custom_tool_call_output","call_id":"call_1","output":"done"}],"stream":true}`,
+			onExhausted: qualityRetryFailClosed,
+			wantClean:   true,
+		},
+		{
+			name:        "tool result with hosted tools preserves empty stream protection",
+			body:        `{"model":"grok-4.7","tools":[{"type":"web_search"}],"input":[{"type":"function_call_output","call_id":"call_1","output":"done"}],"stream":true}`,
+			onExhausted: qualityRetryFailClosed,
+			wantError:   true,
+			empty:       true,
+		},
+		{
+			name:        "new user turn after tool history still checks reasoning",
+			previous:    true,
+			body:        `{"model":"grok-4.7","previous_response_id":"resp-root","input":[{"type":"function_call_output","call_id":"call_1","output":"done"},{"role":"user","content":"Solve a new problem."}],"stream":true}`,
+			onExhausted: qualityRetryFailClosed,
+			wantError:   true,
+			wantMissing: true,
 		},
 	}
 	for _, test := range tests {
@@ -1328,11 +1398,11 @@ func TestAttemptLoopQualityHoldPreservesReplaySafety(t *testing.T) {
 				}
 				credentials = append(credentials, credential)
 			}
-			if err := modelRepo.UpsertDiscovered(ctx, accountdomain.ProviderBuild, []string{"grok-4.6"}); err != nil {
+			if err := modelRepo.UpsertDiscovered(ctx, accountdomain.ProviderBuild, []string{"grok-4.7"}); err != nil {
 				t.Fatal(err)
 			}
 			for _, credential := range credentials {
-				if err := modelRepo.ReplaceAccountCapabilities(ctx, credential.ID, []string{"grok-4.6"}, time.Now().UTC()); err != nil {
+				if err := modelRepo.ReplaceAccountCapabilities(ctx, credential.ID, []string{"grok-4.7"}, time.Now().UTC()); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -1355,15 +1425,15 @@ func TestAttemptLoopQualityHoldPreservesReplaySafety(t *testing.T) {
 			}
 
 			noThinking := sse(
-				`data: {"type":"response.created","response":{"id":"resp-bad","model":"grok-4.6"}}`,
+				`data: {"type":"response.created","response":{"id":"resp-bad","model":"grok-4.7"}}`,
 				`data: {"type":"response.output_text.delta","delta":"`+strings.Repeat("bad ", 20)+`"}`,
-				`data: {"type":"response.completed","response":{"id":"resp-bad","model":"grok-4.6","usage":{"output_tokens":40,"output_tokens_details":{"reasoning_tokens":0}}}}`,
+				`data: {"type":"response.completed","response":{"id":"resp-bad","model":"grok-4.7","usage":{"output_tokens":40,"output_tokens_details":{"reasoning_tokens":0}}}}`,
 			)
 			thinking := sse(
-				`data: {"type":"response.created","response":{"id":"resp-good","model":"grok-4.6"}}`,
+				`data: {"type":"response.created","response":{"id":"resp-good","model":"grok-4.7"}}`,
 				`data: {"type":"response.reasoning_summary_text.delta","delta":"real reasoning"}`,
 				`data: {"type":"response.output_text.delta","delta":"good answer"}`,
-				`data: {"type":"response.completed","response":{"id":"resp-good","model":"grok-4.6","usage":{"output_tokens":40,"output_tokens_details":{"reasoning_tokens":20}}}}`,
+				`data: {"type":"response.completed","response":{"id":"resp-good","model":"grok-4.7","usage":{"output_tokens":40,"output_tokens_details":{"reasoning_tokens":20}}}}`,
 			)
 			firstBody := noThinking
 			if test.empty {
@@ -1387,7 +1457,7 @@ func TestAttemptLoopQualityHoldPreservesReplaySafety(t *testing.T) {
 			})
 
 			input := Input{
-				RequestID: "req-quality-safe", ClientKey: key, PublicModel: "grok-4.6",
+				RequestID: "req-quality-safe", ClientKey: key, PublicModel: "grok-4.7",
 				Streaming: true, Body: []byte(test.body),
 			}
 			if test.previous {
@@ -1415,7 +1485,7 @@ func TestAttemptLoopQualityHoldPreservesReplaySafety(t *testing.T) {
 				t.Fatalf("request error = %v, wantError=%t", requestErr, test.wantError)
 			}
 			if !test.wantError && !strings.Contains(string(responseBody), "bad ") {
-				t.Fatalf("fail-open did not deliver the held first attempt: %s", responseBody)
+				t.Fatalf("did not deliver the first attempt: %s", responseBody)
 			}
 			attempts := adapter.Attempts()
 			if len(attempts) != 1 || attempts[0] != credentials[0].ID {
@@ -1425,8 +1495,20 @@ func TestAttemptLoopQualityHoldPreservesReplaySafety(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !test.truncated && (cooled.CooldownUntil == nil || (test.wantMissing && cooled.LastError != lastErrorMissingThinking)) {
+			if !test.truncated && !test.wantClean && (cooled.CooldownUntil == nil || (test.wantMissing && cooled.LastError != lastErrorMissingThinking)) {
 				t.Fatalf("degraded account was not penalized: %#v", cooled)
+			}
+			if test.wantClean {
+				if cooled.CooldownUntil != nil || cooled.LastError != "" || cooled.FailureCount != 0 {
+					t.Fatalf("tool-result answer incorrectly penalized the account: %#v", cooled)
+				}
+				logs, total, err := auditRepo.List(ctx, 0, 10)
+				if err != nil || total != 1 || logs[0].ErrorCode != "" || logs[0].StatusCode != http.StatusOK {
+					t.Fatalf("tool-result answer audit = %#v, total=%d, err=%v", logs, total, err)
+				}
+				if service.qualityRetryConfig().toolResultContinuation {
+					t.Fatal("request-local exemption leaked into shared runtime settings")
+				}
 			}
 			if test.truncated {
 				if cooled.LastError == lastErrorMissingThinking || (cooled.CooldownUntil != nil && time.Until(*cooled.CooldownUntil) >= time.Hour) {

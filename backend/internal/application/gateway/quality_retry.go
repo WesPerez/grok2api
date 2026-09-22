@@ -50,14 +50,18 @@ type QualityRetryRuntime struct {
 	// (idle timeout / empty peek). Missing-thinking still uses AccountCooldown.
 	IdleAccountCooldown time.Duration
 	MinEncryptedBytes   int
+	// Request-local evidence; this is not a runtime setting. Tool-result
+	// continuations may acknowledge a result without another reasoning item.
+	toolResultContinuation bool
 }
 
 // QualityStreamSignals is the hold classifier input. Tests drive this
 // directly and via ObserveQualityChunk on SSE fixtures.
 type QualityStreamSignals struct {
-	HasThinking       bool
-	HasReasoningDelta bool
-	HasToolCall       bool
+	HasThinking            bool
+	HasReasoningDelta      bool
+	HasToolCall            bool
+	ToolResultContinuation bool
 	// ReasoningStarted is an empty reasoning item or the Chat SSE stub
 	// `: grok2api-reasoning-start`. A marker alone contains no reasoning.
 	ReasoningStarted bool
@@ -144,6 +148,9 @@ func ClassifyQualityHold(sig QualityStreamSignals, minOutput int64) QualityVerdi
 	// Only actual visible content counts. Usage-only responses are handled as
 	// empty streams by finishQualityPeek, not as missing-reasoning strikes.
 	output := sig.VisibleTokens
+	if sig.ToolResultContinuation && sig.Terminal && output > 0 {
+		return QualityDeliver
+	}
 	if sig.Terminal {
 		if output <= 0 {
 			return QualityWait
@@ -297,6 +304,51 @@ func shouldHoldQualityStream(input Input, ownership *inferencedomain.ResponseOwn
 // on another account.
 func canReplayQualityHoldAcrossAccounts(input Input, ownership *inferencedomain.ResponseOwnership) bool {
 	return ownership == nil && !qualityRequestHasReplayUnsafeHostedTools(input.Body)
+}
+
+// qualityRequestEndsWithToolResult only exempts the immediate tool-result
+// continuation. A tool result earlier in the history must not exempt a later
+// user request. Inspect protocol items, never arbitrary tool output/schema data.
+func qualityRequestEndsWithToolResult(body []byte) bool {
+	var payload map[string]any
+	if json.Unmarshal(body, &payload) != nil {
+		return false
+	}
+	items, _ := payload["messages"].([]any)
+	if raw, exists := payload["input"]; exists {
+		items, _ = raw.([]any)
+	}
+	for index := len(items) - 1; index >= 0; index-- {
+		item, ok := items[index].(map[string]any)
+		if !ok {
+			return false
+		}
+		switch jsonNodeString(item["type"]) {
+		case "function_call_output", "custom_tool_call_output", "local_shell_call_output",
+			"shell_call_output", "apply_patch_call_output", "mcp_tool_call_output",
+			"tool_search_output", "computer_call_output", "tool_result":
+			return true
+		case "reasoning", "additional_tools":
+			continue
+		}
+		switch jsonNodeString(item["role"]) {
+		case "system", "developer":
+			continue
+		case "tool", "function":
+			return true
+		case "user":
+			blocks, _ := item["content"].([]any)
+			for _, rawBlock := range blocks {
+				block, _ := rawBlock.(map[string]any)
+				if jsonNodeString(block["type"]) != "tool_result" {
+					return false
+				}
+			}
+			return len(blocks) > 0
+		}
+		return false
+	}
+	return false
 }
 
 func qualityRequestHasReplayUnsafeHostedTools(body []byte) bool {

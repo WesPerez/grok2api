@@ -41,6 +41,8 @@ type qualityScanState struct {
 	terminal          bool
 	terminalFailure   bool
 	holdExpired       bool
+
+	toolResultContinuation bool
 }
 
 type qualityReadResult struct {
@@ -168,6 +170,8 @@ func (s *qualityScanState) signals() QualityStreamSignals {
 		Terminal:          s.terminal,
 		TerminalFailure:   s.terminalFailure,
 		HoldExpired:       s.holdExpired,
+
+		ToolResultContinuation: s.toolResultContinuation,
 	}
 }
 
@@ -531,6 +535,8 @@ func peekQualityStream(ctx context.Context, body io.ReadCloser, protocol string,
 	state := qualityScanState{
 		protocol:          protocol,
 		minEncryptedBytes: cfg.MinEncryptedBytes,
+
+		toolResultContinuation: cfg.toolResultContinuation,
 	}
 	var held bytes.Buffer
 	holdTimer := time.NewTimer(cfg.HoldTimeout)

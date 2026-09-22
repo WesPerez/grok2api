@@ -30,11 +30,12 @@ func TestQualityDeliveryIndependentOfReadBoundaries(t *testing.T) {
 	t.Parallel()
 	longText := strings.Repeat("word ", 40)
 	for _, test := range []struct {
-		name     string
-		protocol string
-		frames   []string
-		verdict  QualityVerdict
-		wantErr  error
+		name                   string
+		protocol               string
+		frames                 []string
+		verdict                QualityVerdict
+		wantErr                error
+		toolResultContinuation bool
 	}{
 		{
 			name: "responses high reasoning ratio", protocol: qualityProtocolResponses, verdict: QualityDeliver,
@@ -161,6 +162,24 @@ func TestQualityDeliveryIndependentOfReadBoundaries(t *testing.T) {
 				`data: {"type":"response.completed","response":{}}`,
 			},
 		},
+		{
+			name: "tool-result terminal answer without more reasoning", protocol: qualityProtocolResponses,
+			verdict: QualityDeliver, toolResultContinuation: true,
+			frames: []string{
+				`data: {"type":"response.output_text.delta","delta":"` + longText + `"}`,
+				`data: {"type":"response.completed","response":{"usage":{"output_tokens":69,"output_tokens_details":{"reasoning_tokens":0}}}}`,
+			},
+		},
+		{
+			name: "tool-result completed empty answer remains empty", protocol: qualityProtocolResponses,
+			verdict: QualityWait, wantErr: errQualityEmptyStream, toolResultContinuation: true,
+			frames: []string{`data: {"type":"response.completed","response":{"output":[],"usage":{"output_tokens":69}}}`},
+		},
+		{
+			name: "tool-result upstream failure is preserved", protocol: qualityProtocolResponses,
+			verdict: QualityDeliver, toolResultContinuation: true,
+			frames: []string{`data: {"type":"response.failed","response":{"error":{"code":"upstream_unavailable"}}}`},
+		},
 	} {
 		for _, chunkSize := range []int{1, 7, 4096} {
 			t.Run(fmt.Sprintf("%s/chunk_%d", test.name, chunkSize), func(t *testing.T) {
@@ -172,7 +191,9 @@ func TestQualityDeliveryIndependentOfReadBoundaries(t *testing.T) {
 				}
 				wire := sse(test.frames...)
 				body := io.NopCloser(qualityChunkReader{Reader: strings.NewReader(wire), limit: chunkSize})
-				replay, verdict, _, _, err := peekQualityStream(context.Background(), body, test.protocol, QualityRetryRuntime{MinOutputTokens: 32, HoldTimeout: 10 * time.Second})
+				replay, verdict, _, _, err := peekQualityStream(context.Background(), body, test.protocol, QualityRetryRuntime{
+					MinOutputTokens: 32, HoldTimeout: 10 * time.Second, toolResultContinuation: test.toolResultContinuation,
+				})
 				if replay != nil {
 					defer replay.Close()
 				}
