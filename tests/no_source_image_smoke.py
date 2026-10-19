@@ -73,9 +73,28 @@ def probe(password):
     token = login["data"]["tokens"]["accessToken"]
     require(api("/api/admin/v1/me", token=token)["data"]["username"] == "offline-admin",
             "Management authentication is not functional")
-    for path in ("/api/admin/v1/accounts", "/api/admin/v1/models"):
-        data = api(path, token=token)["data"]
-        require(data["total"] == 0 and data["items"] == [], f"{path}: expected a fresh empty store")
+    data = api("/api/admin/v1/accounts", token=token)["data"]
+    require(data["total"] == 0 and data["items"] == [], "Expected a fresh account-free store")
+    # The shipped provider catalog is seeded locally at startup. Catalog rows
+    # are not configured upstream accounts: verify their availability instead
+    # of incorrectly requiring the management catalog itself to be empty.
+    catalog_ids = set()
+    catalog_total = None
+    for page in range(1, 31):
+        data = api(f"/api/admin/v1/models?page={page}&pageSize=100", token=token)["data"]
+        if catalog_total is None:
+            catalog_total = data["total"]
+        require(data["total"] == catalog_total, "Offline catalog changed during pagination")
+        for model in data["items"]:
+            require(model["available"] is False and model["totalAccounts"] == 0 and
+                    model["supportedAccounts"] == 0 and model["accountIds"] == [],
+                    "Catalog must not claim a configured/available account")
+            require(model["id"] not in catalog_ids, "Catalog pagination repeated a row")
+            catalog_ids.add(model["id"])
+        if len(catalog_ids) == catalog_total:
+            break
+        require(bool(data["items"]), "Catalog pagination ended before the reported total")
+    require(len(catalog_ids) == catalog_total, "Offline catalog exceeds smoke pagination budget")
 
     status, raw = request("/")
     require(status == 200 and b"<html" in raw.lower(), "Management UI is not served")
@@ -98,11 +117,15 @@ def probe(password):
     require(ready.get("ready") is False, "Empty service must not advertise inference readiness")
     components = ready.get("components", {})
     require(components.get("runtime_store", {}).get("state") == "ready", "Local runtime failed")
-    require(components.get("model_routes", {}).get("state") == "unavailable", "Missing model routes not reported")
+    require(components.get("billing_ledger", {}).get("state") == "ready", "Local billing ledger failed")
+    require(components.get("model_routes", {}).get("state") in ("ready", "unavailable"), "Model configuration not reported")
+    require(all(components.get(name, {}).get("state") not in ("ready", "degraded", "warming")
+                for name in ("grok_build", "grok_web", "grok_console")), "Empty providers must not claim availability")
     require(api("/v1/models", token=key)["data"] == [], "Client catalog should be empty")
     require(api("/healthz").get("ok") is True, "Empty readiness broke liveness")
     api("/api/admin/v1/me", token=token)
-    return {"result": "passed", "accounts": 0, "models": 0, "network": "loopback-only",
+    return {"result": "passed", "accounts": 0, "availableModels": 0,
+            "managementCatalogModels": catalog_total, "network": "loopback-only",
             "healthStatus": 200, "adminLoginStatus": 200, "adminMeStatus": 200,
             "unauthenticatedAccountsStatus": 401, "uiAndEntrypointStatus": 200,
             "clientModelsStatus": 200, "readinessStatus": 503, "readiness": ready,
