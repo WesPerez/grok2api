@@ -103,8 +103,11 @@ def probe(password):
     assets = re.findall(r'<script[^>]+src="(/grok2api/assets/[^"?]+\.js)"', raw.decode())
     require(bool(assets), "Management UI has no bundled entrypoint")
     for path in assets:
-        status, asset = request(path)
-        require(status == 200 and len(asset) > 100, "Management UI entrypoint is missing")
+        # This fork's documented ingress strips /grok2api before forwarding
+        # to the backend. We probe the backend directly, not an nginx server.
+        status, asset = request(path.removeprefix("/grok2api"))
+        require(status == 200 and len(asset) > 100,
+                f"Bundled entrypoint backend response: HTTP {status}, bytes={len(asset)}")
 
     # A local client key is not an upstream account; it proves the authenticated
     # client catalog reports an honest empty result without an external source.
@@ -130,6 +133,7 @@ def probe(password):
             "managementCatalogModels": catalog_total, "network": "loopback-only",
             "healthStatus": 200, "adminLoginStatus": 200, "adminMeStatus": 200,
             "unauthenticatedAccountsStatus": 401, "uiAndEntrypointStatus": 200,
+            "uiTransport": "backend assets after documented nginx prefix rewrite; not browser rendering",
             "clientModelsStatus": 200, "readinessStatus": 503, "readiness": ready,
             "scope": "published-image startup and management; no inference or production mutation"}
 
@@ -150,6 +154,10 @@ def main():
     require(bool(re.fullmatch(r"ghcr\.io/wesperez/grok2api@sha256:[a-f0-9]{64}", args.image or "")),
             "Use an immutable published Grok image digest")
     require(bool(re.fullmatch(r"[a-f0-9]{40}", args.revision or "")), "Expected image revision is required")
+    ingress = (Path(__file__).resolve().parents[1] /
+               "deploy/nginx/grok2api.locations.conf").read_text()
+    require("rewrite ^/grok2api/(.*)$ /$1 break;" in ingress,
+            "Documented frontend prefix rewrite differs from the smoke contract")
     run("docker", "pull", "--platform", "linux/amd64", args.image, timeout=240)
     metadata = json.loads(run("docker", "image", "inspect", args.image))[0]
     require(metadata["Config"]["Labels"].get("org.opencontainers.image.revision") == args.revision,
