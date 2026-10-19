@@ -30,6 +30,25 @@ env:
   SOURCE_REF_NAME: ${{ vars.CI_SOURCE_REF_NAME || github.ref_name }}
 
 jobs:
+  no_source_image:
+    name: Offline published-image smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run exact production-image smoke with no accounts or network
+        run: >-
+          python3 tests/no_source_image_smoke.py
+          --image ghcr.io/wesperez/grok2api@sha256:c81451845e2dd95d92d2975560f2367a1c7652f38cd6242c6fdad3f57a1a8fb9
+          --revision 3a4b062805ab36552f57bc184541567af5e38ed1
+      - name: Preserve bounded evidence (no credentials or database)
+        uses: actions/upload-artifact@v4
+        with:
+          name: no-source-image-evidence
+          path: no-source-image-evidence.json
+          if-no-files-found: error
+          retention-days: 7
+
   verify:
     name: Verify
     runs-on: ubuntu-latest
