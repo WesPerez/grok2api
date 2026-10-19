@@ -98,7 +98,9 @@ def probe(password):
 
     status, raw = request("/")
     require(status == 200 and b"<html" in raw.lower(), "Management UI is not served")
-    assets = re.findall(r'<script[^>]+src="(/assets/[^"?]+\.js)"', raw.decode())
+    # The published frontend intentionally lives below /grok2api/. Keep
+    # requests on loopback and validate that exact bundled asset namespace.
+    assets = re.findall(r'<script[^>]+src="(/grok2api/assets/[^"?]+\.js)"', raw.decode())
     require(bool(assets), "Management UI has no bundled entrypoint")
     for path in assets:
         status, asset = request(path)
