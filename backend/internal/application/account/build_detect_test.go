@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -22,16 +23,42 @@ import (
 )
 
 type detectResponsesAdapter struct {
-	status int
-	body   []byte
+	status    int
+	body      []byte
+	onRequest func(provider.ResponseResourceRequest)
 }
 
 func (a detectResponsesAdapter) Provider() accountdomain.Provider { return accountdomain.ProviderBuild }
-func (a detectResponsesAdapter) ForwardResponse(context.Context, provider.ResponseResourceRequest) (*provider.Response, error) {
+func (a detectResponsesAdapter) ForwardResponse(_ context.Context, request provider.ResponseResourceRequest) (*provider.Response, error) {
+	if a.onRequest != nil {
+		a.onRequest(request)
+	}
 	return &provider.Response{
 		StatusCode: a.status,
 		Body:       io.NopCloser(bytes.NewReader(a.body)),
 	}, nil
+}
+
+func TestForwardBuildDetectUsesGrok47(t *testing.T) {
+	var captured provider.ResponseResourceRequest
+	adapter := detectResponsesAdapter{status: http.StatusOK, onRequest: func(request provider.ResponseResourceRequest) {
+		captured = request
+	}}
+	service := &Service{providers: provider.NewRegistry(adapter)}
+	response, err := service.forwardBuildDetect(context.Background(), accountdomain.Credential{
+		ID: 42, Provider: accountdomain.ProviderBuild,
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	var body map[string]any
+	if err := json.Unmarshal(captured.Body, &body); err != nil {
+		t.Fatal(err)
+	}
+	if captured.Model != "grok-4.7" || body["model"] != "grok-4.7" || captured.Credential.ID != 42 {
+		t.Fatalf("detect must probe the selected account with Grok 4.7: model=%s body=%v account=%d", captured.Model, body, captured.Credential.ID)
+	}
 }
 
 func TestDetectBuildAccountsRequiresExplicitScope(t *testing.T) {
@@ -210,7 +237,7 @@ func TestFinishBuildDetectResponseUsesScopedFailureState(t *testing.T) {
 	}
 	item = service.finishBuildDetectResponse(ctx, &provider.Response{
 		StatusCode: http.StatusForbidden,
-		Body:       io.NopCloser(bytes.NewReader([]byte(`{"error":"You've used all the included free usage for model grok-4.5"}`))),
+		Body:       io.NopCloser(bytes.NewReader([]byte(`{"error":"You've used all the included free usage for model grok-4.7"}`))),
 	}, modelQuotaAccount, nil)
 	if item.Outcome != BuildDetectOutcomeFailed {
 		t.Fatalf("model quota outcome = %s, want failed", item.Outcome)

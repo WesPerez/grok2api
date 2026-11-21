@@ -137,8 +137,7 @@ func buildOfficialTokenPrices() map[string]tokenPrice {
 	}
 	register("grok-build-0.1", tokenPrice{InputTicks: 10000, CachedInputTicks: 2000, OutputTicks: 20000, LongContextTokens: 200000, LongInputTicks: 20000, LongCachedTicks: 4000, LongOutputTicks: 40000},
 		"grok-code-fast-1", "grok-code-fast", "grok-code-fast-1-0825", "grok-composer-2.5-fast")
-	// grok-4.7 has not been published on the xAI pricing page yet; it is billed
-	// at the grok-4.6 frontier rate until an official rate is available.
+	// Official Grok 4.7 pricing, including the rate above 200k input tokens.
 	register("grok-4.7", tokenPrice{InputTicks: 20000, CachedInputTicks: 5000, OutputTicks: 60000, LongContextTokens: 200000, LongInputTicks: 40000, LongCachedTicks: 10000, LongOutputTicks: 120000},
 		"grok-4.7-latest")
 	register("grok-4.6", tokenPrice{InputTicks: 20000, CachedInputTicks: 5000, OutputTicks: 60000, LongContextTokens: 200000, LongInputTicks: 40000, LongCachedTicks: 10000, LongOutputTicks: 120000},
