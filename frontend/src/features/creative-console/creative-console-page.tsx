@@ -42,7 +42,9 @@ import {
 import { getClientKeySecret, listClientKeys, type ClientKeyDTO } from "@/features/client-keys/client-keys-api";
 import { importVideoInputFromURL, uploadMediaInput } from "@/features/media/media-api";
 import { PageHeader } from "@/shared/components/page-header";
+import { runtimeConfig } from "@/shared/config/runtime-config";
 import { cn } from "@/shared/lib/cn";
+import { serverImageURL } from "@/shared/lib/server-media-url";
 
 type CreativeMode = "chat" | "image" | "video" | "voice";
 type ConversationMessage = ChatMessage & {
@@ -1992,7 +1994,8 @@ function safeAssistantLink(value: string | null): string {
 function safeAssistantImage(value: string | null): string {
   const source = value?.trim() ?? "";
   if (!source) return "";
-  if (source.startsWith("/v1/media/images/")) return source;
+  const media = serverImageURL(source, runtimeConfig.apiBaseUrl, window.location.origin);
+  if (media) return media;
   try {
     const parsed = new URL(source);
     return parsed.protocol === "https:" ? parsed.toString() : "";

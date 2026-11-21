@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "date": "2026-11-22",
+  "upstream_repository": "chenyme/grok2api",
+  "previous_upstream": "5e5ad75556b61a2c4a8fcf344d83bfe7760f2b42",
+  "previous_customization": "62dc55920275d29b34f5c04f4d89ca16b0f1e934",
+  "upstream": "8535932b0783db2033657f36e2e1a84196c4e151",
+  "previous_smoke": "e18ce68f11e4e56498f8c8000af4ff89f74d8351",
+  "duties": {
+    "deployment": [
+      "e7b12aed",
+      "62dc5592",
+      "95a9affb",
+      "b80348fa",
+      "e89afeb8",
+      "ea26be15",
+      "e18ce68f"
+    ],
+    "accounts": [
+      "1e06fccf"
+    ],
+    "gateway": [
+      "86310292"
+    ]
+  },
+  "acceptance": "final SHA hosted CI required; source candidate is not production acceptance"
+}

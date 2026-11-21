@@ -1,9 +1,13 @@
 package cli
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/chenyme/grok2api/backend/internal/infra/config"
+	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
 )
 
 func TestDefaultConfigPathFindsRepositoryRoot(t *testing.T) {
@@ -19,6 +23,32 @@ func TestDefaultConfigPathFindsRepositoryRoot(t *testing.T) {
 
 	if path := defaultConfigPath(); path != filepath.Join("..", "config.yaml") {
 		t.Fatalf("defaultConfigPath() = %q", path)
+	}
+}
+
+func TestSchemaOnlyPreservesOfflineStateWithoutBootstrappingApplication(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "migration.db")
+	cfg := config.Config{Database: config.DatabaseConfig{Driver: "sqlite", SQLite: config.SQLiteDatabaseConfig{Path: path}}}
+	for range 2 {
+		if err := initializeSchemaOnly(context.Background(), cfg); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db, err := relational.OpenSQLite(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	// Schema-only must not call app.New and create a bootstrap administrator.
+	if count, err := relational.NewAdminRepository(db).Count(context.Background()); err != nil || count != 0 {
+		t.Fatalf("schema-only administrator count = %d, %v", count, err)
+	}
+	options, err := parseOptions([]string{"--schema-only", "--config", "isolated.yaml"})
+	if err != nil || !options.schemaOnly || options.configPath != "isolated.yaml" {
+		t.Fatalf("schema-only options = %#v, %v", options, err)
+	}
+	if err := Run([]string{"--schema-only", "--config", filepath.Join(t.TempDir(), "absent.yaml")}); err == nil {
+		t.Fatal("missing migration configuration was accepted")
 	}
 }
 

@@ -20,6 +20,14 @@ services:
     stop_grace_period: 30s
     security_opt:
       - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+    networks:
+      grok2api_internal:
+        ipv4_address: 172.30.0.2
 
   # ================================ WARP ================================
   # 如果出口 IP 不干净，可取消以下注释使用 WARP 作为落地代理。
@@ -53,8 +61,9 @@ services:
 
   # ================================ EGRESS QUALITY GUARD ================================
   # 可选的 Grok Build 出口质量守护 sidecar。默认不启动，也不会产生探测请求。
-  # 启用前在 config.yaml 中配置 qualityGuard，然后执行：
-  # docker compose --profile quality-guard up -d --build
+  # 本服务器常规发布只更新 grok2api，不启用本 profile。
+  # 下方 build 定义仅供远程构建环境；本服务器不得构建或启动此 sidecar。
+  # 若要启用，须先交由 hosted CI 发布并验收独立镜像，再登记正式部署合同。
 
   egress-quality-guard:
     container_name: grok2api-egress-quality-guard
@@ -62,10 +71,9 @@ services:
     build:
       context: .
       dockerfile: tools/egress-quality-guard/Dockerfile
+    network_mode: "service:grok2api"
     environment:
-      # Default matches the Compose service name. Override for host networking
-      # or a renamed grok2api service, e.g. http://127.0.0.1:8000
-      GROK2API_BASE_URL: ${GROK2API_BASE_URL:-http://grok2api:8000}
+      GROK2API_BASE_URL: http://127.0.0.1:8000
     depends_on:
       grok2api:
         condition: service_healthy
@@ -76,7 +84,21 @@ services:
     stop_grace_period: 30s
     security_opt:
       - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
 
 volumes:
   grok2api-data:
   quality_guard_state:
+
+networks:
+  grok2api_internal:
+    name: grok2api_internal
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
+          gateway: 172.30.0.1

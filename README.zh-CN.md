@@ -352,10 +352,10 @@ Hysteria 与 TUIC 暂未支持。FlareSolverr 仅接受 HTTP/SOCKS 代理地址�
 ```yaml
 qualityGuard:
   enabled: true
-  model: "grok-4.6"
-  # 思考模型缺流式 reasoning 时先扣住响应，换号再打，不把降智正文发给用户。
-  # 最多观察 30 秒；stub 加上足够可见输出在超时后扣住（TUI 30s 后的短问候），
-  # 空 stub 继续等。floor 已达标但 1 秒内吐短回复的也扣。
+  model: "grok-4.7"
+  # 可选检查已完成的纯文本响应是否包含请求的推理。
+  # 推理或工具输出立即放行；30 秒后放行已有正文。
+  # 空流仍受 Provider 的语义空闲超时约束。
   requestRetry:
     enabled: true
     maxAttempts: 6
@@ -368,7 +368,7 @@ qualityGuard:
     idleAccountCooldown: 15m
 ```
 
-`requestRetry` 在网关请求路径上生效，与 sidecar 探测/隔离相互独立。上面的示例显式开启；内置默认值和 `config.example.yaml` 均将 `enabled`、`autoDisable` 设为关闭。任一开关开启后都会启用请求内质量检测与重试。可见输出达到 `minOutputTokens` 且全程无流式 reasoning 时**不发给用户**，排除该账号再试；`autoDisable: true` 会在首次确认缺 thinking 或吞吐降智（soft/hard/burst）时直接禁用账号。管理页面的“自动停用降智账号”控制 `autoDisable`，关闭后恢复 YAML 中 `requestRetry.enabled` 的原有策略。全部仍无推理则按 `onExhausted` 返回 `503 quality_degraded` 或放出最后一枪。上下文压缩同时豁免缺 thinking 和输出速度的账号惩罚。不处理图/视频、stored response 钉账号和 ForcedEgress 探针。Grok TUI 带 tools 的回合仍会 hold，避免 0-thinking 降智流跳过闸门。
+`requestRetry` 在网关请求路径上生效，与 sidecar 探测/隔离相互独立。`config.example.yaml` 默认关闭；开启后只检查已完成、达到文本阈值且没有请求推理的纯文本响应。推理摘要、达到固定小 stub 下限的密文推理和工具调用会立即放行；网络到达速度、Token 比例和每 Token 密文字节数不用于判断质量。明确的上游失败保留原始错误，不记为缺思考；只有 usage、没有实际输出的响应仍算空流。观察期限到达后放行已有正文，不根据尚未到齐的元数据处罚账号。只有可安全重放的无状态请求才会换号；账号绑定状态和有副作用的 hosted tools 不跨账号重放。最终按 `onExhausted` 返回 `503 quality_degraded` 或放出当前响应；上下文压缩、图片、视频和 ForcedEgress 探针保持豁免。 内置默认将 `enabled`、`autoDisable` 均设为关闭；显式开启 `autoDisable` 会同时启用请求内检测，并在明确缺推理或达到配置吞吐阈值时停用账号。关闭后恢复 YAML 的 `enabled` 策略；输出吞吐惩罚与完成纯文本的缺推理分类分别处理。
 
 ```bash
 docker compose --profile quality-guard up -d --build
@@ -506,3 +506,7 @@ make swagger
 - [English README](./README.md)
 - [后端说明](./backend/README.md)
 - [前端说明](./frontend/README.md)
+
+## Production server policy / 生产服务器约束
+
+This deployment uses GitHub-hosted CI only. Do not install dependencies or build on the production server; see [AGENTS.md](AGENTS.md) and [deployment policy](DEPLOYMENT.zh-CN.md).

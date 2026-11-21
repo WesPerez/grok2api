@@ -22,6 +22,7 @@ import { PageHeader } from "@/shared/components/page-header";
 import { Pagination } from "@/shared/components/pagination";
 import { SortableTableHead } from "@/shared/components/sortable-table-head";
 import { VirtualTableBody } from "@/shared/components/virtual-table-body";
+import { runtimeConfig } from "@/shared/config/runtime-config";
 import { useDebouncedValue } from "@/shared/hooks/use-debounced-value";
 import { cn } from "@/shared/lib/cn";
 import { formatDateTime, formatNumber } from "@/shared/lib/format";
@@ -418,5 +419,5 @@ function formatSpec(job: MediaJobDTO): string {
 }
 
 function videoAssetURL(assetID: string): string {
-  return `/v1/media/videos/${encodeURIComponent(assetID)}`;
+  return `${runtimeConfig.apiBaseUrl}/v1/media/videos/${encodeURIComponent(assetID)}`;
 }
