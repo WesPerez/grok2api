@@ -500,20 +500,19 @@ func qualityRetryRuntime(value config.QualityGuardConfig) gateway.QualityRetryRu
 		// Auto-disable needs request-path detection even when the YAML retry
 		// switch is off. Derive this at runtime so turning auto-disable off
 		// restores the original policy without persisting a second switch.
-		Enabled:                         retry.Enabled || retry.AutoDisable,
-		MaxAttempts:                     retry.MaxAttempts,
-		HoldTimeout:                     retry.HoldTimeout.Value(),
-		MinOutputTokens:                 int64(retry.MinOutputTokens),
-		OnExhausted:                     retry.OnExhausted,
-		AutoDisable:                     retry.AutoDisable,
-		AccountCooldown:                 retry.AccountCooldown.Value(),
-		IdleAccountCooldown:             retry.IdleAccountCooldown.Value(),
-		MinEncryptedBytes:               retry.MinEncryptedBytes,
-		EncryptedBytesPerReasoningToken: retry.EncryptedBytesPerReasoningToken,
-		SoftTPS:                         value.SoftTPS,
-		HardTPS:                         value.HardTPS,
-		MinGenerationMS:                 value.MinimumGenerationWindow.Value().Milliseconds(),
-		FailClosed:                      value.FailClosed,
+		Enabled:             retry.Enabled || retry.AutoDisable,
+		MaxAttempts:         retry.MaxAttempts,
+		HoldTimeout:         retry.HoldTimeout.Value(),
+		MinOutputTokens:     int64(retry.MinOutputTokens),
+		OnExhausted:         retry.OnExhausted,
+		AutoDisable:         retry.AutoDisable,
+		AccountCooldown:     retry.AccountCooldown.Value(),
+		IdleAccountCooldown: retry.IdleAccountCooldown.Value(),
+		MinEncryptedBytes:   retry.MinEncryptedBytes,
+		SoftTPS:             value.SoftTPS,
+		HardTPS:             value.HardTPS,
+		MinGenerationMS:     value.MinimumGenerationWindow.Value().Milliseconds(),
+		FailClosed:          value.FailClosed,
 	}
 }
 

@@ -133,3 +133,13 @@ Codex 客户端验收需要另用真实客户端，并核对 Router 审计中的
 最终远端分支发布后，确认 `/root/grok2api` 干净且无其他写入者，fetch 并同步到同一
 `origin/mine` SHA；核对本地 HEAD、远端 SHA、纯上游 main 和状态。运行 revision/digest
 另行经正式发布入口验证；从临时工作树推送后拉镜像不会自动更新规范源码目录。
+
+### 锁内旧库升级与发布
+
+发布工具由最终 `mine-image.yml` 的 `release-tools` artifact 提供，安装至
+`/opt/grok2api/deployment/<完整 SHA>/release-transaction.py`。入口为已安装
+`compose-release.sh grok2api transaction <该固定脚本>`；同一 FD 9 发布锁覆盖镜像拉取、
+拓扑核验、一致 SQLite 恢复点、旧列摘要、离线 schema-only 迁移、重复初始化、生产切换和三分钟观察。
+`--schema-only` 只初始化数据库，不建立账号 provider 或后台刷新任务。副本只能使用
+network-none、独立目录和合成配置；不继承生产 DSN。所有旧列及行数必须原样保留，新增缓存列单独验证。
+候选已可能启动后失败，保全新数据库与凭据并明确 recovery_required，不盲目覆盖旧数据库或重放请求。
